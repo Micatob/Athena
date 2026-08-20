@@ -198,17 +198,18 @@ class FindingCorrelator:
         if finding.get("dedup_key"):
             return finding["dedup_key"]
         
-        # Compute from finding attributes
-        title = (finding.get("title") or "").strip().lower()
+        # Compute from finding attributes — use type + payload as discriminator
+        title = (finding.get("title") or finding.get("type") or "").strip().lower()
         asset = (finding.get("affected_asset") or finding.get("url") or "").strip().lower()
         module = (finding.get("detection_module") or "").strip().lower()
         finding_type = (finding.get("type") or "").strip().lower()
+        payload = (finding.get("payload") or "").strip().lower()
         
         # Normalize common variations
         title = self._normalize_title(title)
         asset = self._normalize_asset(asset)
         
-        return f"{module}|{asset}|{finding_type}|{title}"
+        return f"{module}|{asset}|{finding_type}|{payload}"
     
     def _normalize_title(self, title: str) -> str:
         """Normalize a finding title for dedup."""

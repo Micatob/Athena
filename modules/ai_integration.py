@@ -478,7 +478,7 @@ Respond with JSON:
                 duplicates = group_findings[1:]
                 
                 statements.append(AIStatement(
-                    content=f"Found {len(duplicates)} duplicate(s) of finding: {primary.get('title', 'unknown')}",
+                    content=f"Found {len(duplicates)} duplicate(s) of finding: {primary.get('type', 'unknown')}",
                     reasoning_type=AIReasoningType.FACT,
                     confidence=1.0,
                     evidence_refs=[f.get("id", "") for f in group_findings],
@@ -519,7 +519,7 @@ Respond with JSON:
             prioritized.append((score, finding))
             
             statements.append(AIStatement(
-                content=f"Finding '{finding.get('title', 'unknown')}' scored {score:.2f} for prioritization",
+                content=f"Finding '{finding.get('type', 'unknown')}' scored {score:.2f} for prioritization",
                 reasoning_type=AIReasoningType.FACT,
                 confidence=0.9,
                 evidence_refs=[finding.get("id", "")],
@@ -634,16 +634,17 @@ Respond with JSON:
     
     def _compute_dedup_key(self, finding: Dict[str, Any]) -> str:
         """Compute a stable dedup key for a finding."""
-        title = (finding.get("title") or "").strip().lower()
+        title = (finding.get("title") or finding.get("type") or "").strip().lower()
         asset = (finding.get("affected_asset") or finding.get("url") or "").strip().lower()
         module = (finding.get("detection_module") or "").strip().lower()
         finding_type = (finding.get("type") or "").strip().lower()
+        payload = (finding.get("payload") or "").strip().lower()
         
         # Normalize common variations
         title = self._normalize_title(title)
         asset = self._normalize_asset(asset)
         
-        return f"{module}|{asset}|{finding_type}|{title}"
+        return f"{module}|{asset}|{finding_type}|{payload}"
     
     def _normalize_title(self, title: str) -> str:
         """Normalize a finding title for dedup."""

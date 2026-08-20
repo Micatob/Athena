@@ -2,6 +2,7 @@ import asyncio
 import sys
 import os
 import json
+import logging
 import argparse
 import threading
 import time
@@ -1073,16 +1074,14 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             correlator = FindingCorrelator()
             corr_result = correlator.correlate(vulnerabilities)
             if corr_result.duplicates_found > 0:
-                deduped_ids = set()
+                # Build index-based dedup: keep one representative per group
+                seen_groups = set()
                 unique_vulns = []
-                for group_key, finding_ids in corr_result.dedup_groups.items():
-                    for fid in finding_ids:
-                        if fid not in deduped_ids:
-                            deduped_ids.add(fid)
-                            matching = [v for v in vulnerabilities if v.get('id') == fid]
-                            if matching:
-                                unique_vulns.append(matching[0])
-                            break
+                for v in vulnerabilities:
+                    key = correlator._compute_dedup_key(v)
+                    if key not in seen_groups:
+                        seen_groups.add(key)
+                        unique_vulns.append(v)
                 if len(unique_vulns) < len(vulnerabilities):
                     print(f"  [*] Deduplication removed {len(vulnerabilities) - len(unique_vulns)} duplicate findings ({len(vulnerabilities)} -> {len(unique_vulns)})")
                     vulnerabilities = unique_vulns
@@ -1092,6 +1091,34 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             enumeration_results, cve_results, args.output, args.export,
             ai_analysis=ai_analysis
         )
+
+        # Print findings summary to console
+        if vulnerabilities:
+            severity_counts = {}
+            for v in vulnerabilities:
+                sev = v.get('severity', 'INFO').upper()
+                severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+            print(f"\n{'='*60}")
+            print(f"  FINDINGS SUMMARY ({len(vulnerabilities)} total)")
+            print(f"{'='*60}")
+            for sev in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
+                count = severity_counts.get(sev, 0)
+                if count > 0:
+                    print(f"  [{sev}] {count}")
+            print(f"\n  Top findings:")
+            for v in vulnerabilities[:10]:
+                sev = v.get('severity', 'INFO').upper()
+                vtype = v.get('type', 'Unknown')
+                url = v.get('url', 'N/A')
+                print(f"    [{sev}] {vtype}")
+                print(f"           URL: {url}")
+                if v.get('payload'):
+                    print(f"           Payload: {v['payload'][:80]}")
+            if len(vulnerabilities) > 10:
+                print(f"    ... and {len(vulnerabilities) - 10} more (see report)")
+        else:
+            print(f"\n  [i] No vulnerabilities detected")
 
         print(f"\n{'='*60}")
         print(f"  SCAN COMPLETE")

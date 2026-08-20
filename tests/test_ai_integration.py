@@ -69,7 +69,7 @@ def sample_findings():
             "affected_asset": "https://example.com/login",
             "detection_module": "scanner",
             "type": "sql_injection",
-            "dedup_key": "scanner|example.com/login|sql_injection|sql injection in login",
+            "dedup_key": "scanner|example.com/login|sql_injection|",
         },
         {
             "id": "f4",
