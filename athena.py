@@ -1059,6 +1059,16 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 {"mode": args.mode}
             )
             
+            # Print AI analysis results to terminal
+            statements = ai_analysis.get("statements", [])
+            if statements:
+                print(f"\n  [AI Analysis] {len(statements)} insights:")
+                for stmt in statements[:15]:
+                    if isinstance(stmt, dict):
+                        print(f"    [{stmt.get('confidence', 0):.0%}] {stmt.get('content', 'N/A')}")
+                    else:
+                        print(f"    [{stmt.confidence:.0%}] {stmt.content}")
+            
             # Filter out false positives identified by AI
             filtered_indices = ai_analysis.get("filtered_indices", [])
             if filtered_indices:

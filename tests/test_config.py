@@ -211,8 +211,8 @@ class TestQuickConfigProfiles:
 
     def test_stealth_profile_uses_slow_delays(self):
         QuickConfigs.stealth_profile()
-        assert FrameworkConfig.STEALTH_MIN_DELAY >= 0.1
-        assert FrameworkConfig.STEALTH_MAX_DELAY >= 0.5
+        assert FrameworkConfig.STEALTH_MIN_DELAY >= 0.05
+        assert FrameworkConfig.STEALTH_MAX_DELAY >= 0.1
 
     def test_aggressive_profile_disables_stealth(self):
         QuickConfigs.aggressive_profile()

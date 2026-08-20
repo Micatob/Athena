@@ -188,12 +188,12 @@ class QuickConfigs:
         """Maximum stealth – evasive, randomized delays, moderate concurrency."""
         FrameworkConfig.STEALTH_MODE = True
         FrameworkConfig.AGGRESSIVE_MODE = False
-        FrameworkConfig.STEALTH_MIN_DELAY = 0.2
-        FrameworkConfig.STEALTH_MAX_DELAY = 0.8
-        FrameworkConfig.HTTP_TIMEOUT = 10
-        FrameworkConfig.HTTP_MAX_RETRIES = 2
+        FrameworkConfig.STEALTH_MIN_DELAY = 0.1
+        FrameworkConfig.STEALTH_MAX_DELAY = 0.3
+        FrameworkConfig.HTTP_TIMEOUT = 8
+        FrameworkConfig.HTTP_MAX_RETRIES = 1
         FrameworkConfig.HTTP_MAX_CONNECTIONS = 10
-        FrameworkConfig.SCANNING_THREADS = 10
+        FrameworkConfig.SCANNING_THREADS = 15
         FrameworkConfig.EXPLOITATION_THREADS = 5
         FrameworkConfig.BRUTEFORCE_THREADS = 3
         FrameworkConfig.VERBOSE_MODE = False

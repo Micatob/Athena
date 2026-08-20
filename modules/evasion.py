@@ -42,17 +42,17 @@ class ProxyConfig:
 @dataclass
 class EvasionConfig:
     user_agent_rotation: bool = True
-    random_delay_min: float = 0.3
-    random_delay_max: float = 1.0
+    random_delay_min: float = 0.1
+    random_delay_max: float = 0.3
     jitter: bool = True
-    jitter_percent: float = 0.3
+    jitter_percent: float = 0.2
     noise_headers: bool = True
     ip_fragmentation: bool = False
     fragment_size: int = 128
     decoy_sources: bool = False
     decoy_ips: List[str] = field(default_factory=list)
     proxy: Optional[ProxyConfig] = None
-    rate_limit_rps: float = 5.0
+    rate_limit_rps: float = 10.0
 
 
 class EvasionEngine:
