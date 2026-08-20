@@ -1,0 +1,41 @@
+# Athena Security Suite Dependencies
+# ========================================
+# Core
+aiohttp>=3.9.0
+beautifulsoup4>=4.12.0
+psutil>=5.9.0
+dnspython>=2.6.0
+
+# Configuration & Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0
+argparse>=1.4.0
+
+# CLI & Progress
+tqdm>=4.66.0
+
+# Web API
+Flask>=3.0.0
+flask-limiter>=3.5.0
+
+# Reporting
+reportlab>=4.0.0
+weasyprint>=60.0
+
+# Network
+pyOpenSSL>=23.2.0
+cryptography>=41.0.0
+aiohttp-socks>=0.8.0
+httpx>=0.24.0
+
+# PDF & Charts
+matplotlib>=3.8.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+aioresponses>=0.7.4
+bandit>=1.7.5
+flake8>=6.1.0
+black>=24.2.0

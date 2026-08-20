@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Athena Pentest</title>
+    <style>
+        body { width: 300px; padding: 10px; font-family: Arial, sans-serif; }
+        .form-group { margin-bottom: 10px; }
+        label { display: block; margin-bottom: 5px; }
+        input, select { width: 100%; padding: 5px; }
+        button { width: 100%; padding: 8px; background: #007bff; color: white; border: none; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        #status { margin-top: 10px; padding: 5px; border-radius: 3px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h3>Athena Penetration Test</h3>
+    <div class="form-group">
+        <label for="target">Target URL/Domain:</label>
+        <input type="text" id="target" placeholder="example.com" required>
+    </div>
+    <div class="form-group">
+        <label for="mode">Scan Mode:</label>
+        <select id="mode">
+            <option value="1">Full Test (Discovery + Scan + Exploit)</option>
+            <option value="2">Discovery Only</option>
+            <option value="3">Vulnerability Scan</option>
+        </select>
+    </div>
+    <button id="startScan">Start Scan</button>
+    <div id="status"></div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

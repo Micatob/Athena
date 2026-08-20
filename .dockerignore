@@ -1,0 +1,15 @@
+.git/
+.gitignore
+.gitattributes
+__pycache__/
+*.pyc
+.env
+.venv/
+tests/
+docs/
+*.log
+*.jsonl
+*.pem
+report_*.json
+guide_*.md
+post_exploit_*.json

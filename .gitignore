@@ -1,0 +1,61 @@
+# Reports & scan artifacts
+report_*.json
+report_*.html
+report_*.csv
+report_*.pdf
+guide_*.md
+post_exploit_*.json
+*.jsonl*
+*.log
+*.log.*
+
+# Proposal & docs (binary, not for repo)
+Athena_Proposal.docx
+*.docx
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+.env.local
+*.pem
+*.key
+*.crt
+ATHENA_AUTHORIZATION.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Coverage
+coverage/
+.coverage
+coverage.xml
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+.aider*
+
+# Session junk
+SESSION_STATE.md
+MODIFIED_FILES.txt
+New Text Document.txt
