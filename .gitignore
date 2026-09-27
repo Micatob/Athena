@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+*.pem
+*.key
+AETHELRED_AUTHORIZATION.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+*.jsonl
+aethelred.log
+athena_audit.log*
+test_*.log
+
+# Reports
+report_*.json
+guide_*.md
+post_exploit_*.json
+
+# Docker
+.dockerignore
+
+# Coverage
+coverage/
+.coverage
+coverage.xml
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+.aider*

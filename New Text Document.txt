@@ -1,0 +1,2 @@
+python athena.py -t nacosogitech.com.ng -m full -o json -v
+That runs the complete pipeline (discovery → vuln scan → bruteforce → enumeration → CVE mapping → reporting) with JSON output and verbose logging. Add -p stealth if you want lower noise, or -p aggressive for speed
