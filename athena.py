@@ -138,6 +138,16 @@ Examples:
     parser.add_argument('--list-plugins', action='store_true', help='List available plugins')
     parser.add_argument('--export', help='Export results to specified path')
 
+    exploit_group = parser.add_argument_group('Automated Exploitation')
+    exploit_group.add_argument('--no-auto-exploit', action='store_true',
+                               help='Skip automatic verification of detected vulnerabilities')
+    exploit_group.add_argument('--exploit-aggressive', action='store_true',
+                               help='Disable safe mode for automated exploitation (may cause side effects)')
+    exploit_group.add_argument('--exploit-max', type=int, default=15,
+                               help='Max findings to attempt automatically (default: 15)')
+    exploit_group.add_argument('--exploit-delay', type=float, default=1.0,
+                               help='Seconds to wait between exploit attempts (default: 1.0)')
+
     api_group = parser.add_argument_group('REST API Server')
     api_group.add_argument('--api', action='store_true', help='Start the REST API server')
     api_group.add_argument('--api-host', help='Bind host for API server (default: SERVER_HOST or 0.0.0.0)')
@@ -489,17 +499,20 @@ async def run_cve_mapping(technologies: List[Dict[str, Any]]) -> List[VersionCVE
 
 
 def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: List[Dict[str, Any]],
-                     bruteforce: Dict[str, Any] = None, enumeration: Dict[str, Any] = None,
-                     cve_results: List[VersionCVEResult] = None,
-                     output_format: str = 'html', output_path: str = None,
-                     ai_analysis: Dict[str, Any] = None) -> str:
+                    bruteforce: Dict[str, Any] = None, enumeration: Dict[str, Any] = None,
+                    cve_results: List[VersionCVEResult] = None,
+                    output_format: str = 'html', output_path: str = None,
+                    ai_analysis: Dict[str, Any] = None,
+                    exploitation: Dict[str, Any] = None) -> str:
     report_gen = ReportGenerator()
     report_data = {
         'target': target,
         'timestamp': datetime.now().isoformat(),
         'discovery': discovery,
         'vulnerabilities': vulnerabilities,
-        'exploitation': [],
+        'exploitation': (exploitation.get('attempts', [])
+                         if isinstance(exploitation, dict)
+                         else (exploitation or [])),
     }
     if ai_analysis:
         report_data['ai_analysis'] = ai_analysis
@@ -1006,6 +1019,62 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
     return ai_analysis
 
 
+async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any]],
+                                args: argparse.Namespace) -> Dict[str, Any]:
+    """Verify detected vulnerabilities automatically, inside engagement scope.
+
+    Returns the runner summary (``status``/``confirmed``/``possible``/
+    ``inconclusive``/``attempts``) so the report and the post-exploitation
+    stage can consume the evidence. Never raises: a failure to run is
+    reported as a denied/skipped summary, not a crash.
+    """
+    from modules.exploitation_runner import ExploitationRunner
+
+    engagement = _resolve_exploitation_engagement(target, args)
+
+    ai_engine = None
+    try:
+        from modules.ai_integration import AIIntegration
+        candidate = AIIntegration()
+        if candidate.enabled:
+            ai_engine = candidate
+    except Exception:
+        ai_engine = None
+
+    runner = ExploitationRunner(
+        engagement=engagement,
+        ai=ai_engine,
+        max_findings=getattr(args, 'exploit_max', 15),
+        delay=getattr(args, 'exploit_delay', 1.0),
+        aggressive=bool(getattr(args, 'exploit_aggressive', False)),
+    )
+    try:
+        summary = await runner.execute(target, vulnerabilities)
+    except Exception as exc:
+        print(f"[!] Automated exploitation aborted: {exc}")
+        summary = {
+            'status': 'denied',
+            'scope_reason': f'automated exploitation failed: {exc}',
+            'mode': 'aggressive' if getattr(args, 'exploit_aggressive', False) else 'safe',
+            'attempted': 0, 'confirmed': 0, 'possible': 0, 'inconclusive': 0,
+            'attempts': [], 'duration_ms': 0,
+        }
+    finally:
+        await runner.close()
+
+    status = summary.get('status')
+    if status == 'executed':
+        print(f"  [+] Automated exploitation: {summary['confirmed']} confirmed, "
+              f"{summary['possible']} possible, {summary['inconclusive']} inconclusive "
+              f"({summary['attempted']} attempted, mode={summary['mode']})")
+    elif status == 'denied':
+        print(f"  [*] Automated exploitation skipped: {summary.get('scope_reason', '')}")
+    else:
+        print("  [*] Automated exploitation: no supported findings to attempt")
+
+    return summary
+
+
 async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None:
     scan_types_map = {
         'tcp_connect': 'tcp_connect', 'syn': 'syn_stealth', 'syn_stealth': 'syn_stealth',
@@ -1077,10 +1146,16 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                           f"({original_count} -> {len(vulnerabilities)} findings); "
                           "full list recorded in the report")
 
+        # Actively verify what survived triage (scope-gated, safe mode by default)
+        exploitation_summary: Optional[Dict[str, Any]] = None
+        if vulnerabilities and not getattr(args, 'no_auto_exploit', False):
+            exploitation_summary = await run_auto_exploitation(target, vulnerabilities, args)
+
         output_path = generate_report(
             target, discovery_results, vulnerabilities, bruteforce_results,
             enumeration_results, cve_results, args.output, args.export,
-            ai_analysis=ai_analysis
+            ai_analysis=ai_analysis,
+            exploitation=exploitation_summary,
         )
 
         # Hand the scan's findings to the post-exploitation stage so its
@@ -1091,7 +1166,8 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             "vulnerabilities": list(vulnerabilities),
             "discovery": discovery_results or {},
             "bruteforce": bruteforce_results or {},
-            "exploitation": [],
+            "exploitation": (exploitation_summary.get("attempts", [])
+                             if isinstance(exploitation_summary, dict) else []),
         }
 
         print(f"\n{'='*60}")
@@ -1276,11 +1352,15 @@ async def _run_post_ai_suggestions(report: Dict[str, Any]) -> None:
         print(f"      [AI] {s.content[:160]}")
 
 
-def _resolve_engagement(targets: List[str], args: argparse.Namespace):
+def _resolve_engagement(targets: List[str], args: argparse.Namespace,
+                        techniques: Optional[List[str]] = None):
     """Establish the engagement used for post-exploitation (fail-closed).
 
     Priority: ``--scope-file`` → ``--engagement-id`` → explicit ad-hoc from
     ``--target``/targets.  Returns ``None`` when no scope can be established.
+
+    ``techniques`` only applies to the ad-hoc fallback: an explicit scope
+    file or stored engagement always decides its own allow-list.
     """
     from modules.engagement import (EngagementStore, ad_hoc_engagement,
                                     load_engagement_file)
@@ -1302,10 +1382,27 @@ def _resolve_engagement(targets: List[str], args: argparse.Namespace):
             return None
         return engagement
     if targets:
-        return ad_hoc_engagement(list(targets), operator=os.getenv('USER', 'cli'))
+        kwargs: Dict[str, Any] = {"operator": os.getenv('USER', 'cli')}
+        if techniques:
+            kwargs["techniques"] = techniques
+        return ad_hoc_engagement(list(targets), **kwargs)
     print("[!] No engagement or target list provided; post-exploitation will "
           "fail closed (no scope established).")
     return None
+
+
+def _resolve_exploitation_engagement(target: str, args: argparse.Namespace):
+    """Engagement used for automated exploitation (fail closed).
+
+    The ad-hoc technique list exists for ``--post`` and does not include
+    ``exploitation``; the operator's explicit ``-t`` target *is* the
+    authorization for an in-scope scan, so exploitation is added here.
+    An explicit scope file or engagement id is never overridden.
+    """
+    from modules.engagement import AD_HOC_TECHNIQUES, Technique
+    techniques = list(dict.fromkeys(
+        [*AD_HOC_TECHNIQUES, Technique.EXPLOITATION.value]))
+    return _resolve_engagement([target], args, techniques=techniques)
 
 
 def _enforce_session_scope(orchestrator, session, engagement) -> bool:

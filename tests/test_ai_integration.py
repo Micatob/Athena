@@ -387,6 +387,10 @@ class TestLLMTransport:
         def boom(*args, **kwargs):
             raise AssertionError("must not call transport when disabled")
         monkeypatch.setattr("httpx.AsyncClient", boom)
+        # The project `.env` is a real source of keys at runtime, so deleting
+        # process env vars alone is not enough to reach the "nothing is
+        # configured" path: suppress the file fallback for this assertion.
+        monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
                      "DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)

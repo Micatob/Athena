@@ -1151,7 +1151,8 @@ class ReportGenerator:
                 kb = _kb_for(vtype)
                 # Generate URL-specific attack techniques
                 url_specific_techniques = self._generate_url_specific_techniques(
-                    kb['attack_techniques'], confirmed_url, payload, vtype
+                    kb['attack_techniques'], confirmed_url, payload, vtype,
+                    verification=vuln.get('verification'),
                 )
                 details[vtype] = {
                     'description': kb['description'],
@@ -1175,11 +1176,38 @@ class ReportGenerator:
 
         return details
 
+    @staticmethod
+    def _verification_lines(verification: Optional[Dict]) -> List[str]:
+        """Markdown lines for Athena's automated verification evidence.
+
+        Only ``confirmed`` / ``possible`` results qualify: an inconclusive
+        attempt is not evidence and must not be presented as such.
+        """
+        if not isinstance(verification, dict):
+            return []
+        status = str(verification.get('status') or '').strip()
+        if status.lower() not in ('confirmed', 'possible'):
+            return []
+
+        lines = [f"**Automated verification (Athena):** {status.upper()}"]
+        evidence = verification.get('evidence')
+        if isinstance(evidence, dict):
+            description = evidence.get('description') or evidence.get('detail')
+            if description:
+                lines.append(f"**Evidence:** {description}")
+            if evidence.get('payload'):
+                lines.append(f"**Evidence payload:** `{evidence.get('payload')}`")
+        elif isinstance(evidence, str) and evidence.strip():
+            lines.append(f"**Evidence:** {evidence.strip()}")
+        return lines
+
     def _generate_url_specific_techniques(self, base_techniques: List[str], 
-                                           url: str, payload: str, vtype: str) -> List[str]:
+                                          url: str, payload: str, vtype: str,
+                                          verification: Optional[Dict] = None) -> List[str]:
         """Generate URL-specific exploitation steps with actual payloads."""
+        prefix = self._verification_lines(verification)
         if not url:
-            return base_techniques
+            return prefix + list(base_techniques)
         
         parsed = urllib.parse.urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
@@ -1263,7 +1291,7 @@ class ReportGenerator:
             # Use base techniques with URL context
             techniques = [f"**Target URL:** `{url}`"] + base_techniques
         
-        return techniques
+        return prefix + techniques
 
     def _generate_compliance_summary(self, vulnerabilities: List[Dict], results: Dict) -> Dict:
         """Map vulnerabilities to GDPR/PCI-DSS compliance frameworks."""
@@ -1325,12 +1353,21 @@ class ReportGenerator:
         return self._dedup_vulnerabilities(vulnerabilities)[:self.MAX_REPORT_FINDINGS]
 
     def _deduplicate_exploitation_results(self, results: List[Dict]) -> List[Dict]:
-        """Cleanup exploitation logs for the report."""
+        """Cleanup exploitation logs for the report.
+
+        Accepts both the raw handler status (``SUCCESS``/``CONFIRMED``) and
+        the runner's classification (``confirmed``): either way the entry
+        represents a demonstrated vulnerability.  ``possible`` and
+        ``inconclusive`` attempts are not demonstrations and are dropped.
+        """
         seen = set()
         unique = []
         for res in results:
+            if not isinstance(res, dict):
+                continue
+            status = str(res.get('status') or '').strip().upper()
             key = (res.get('type'), res.get('url'))
-            if key not in seen and res.get('status') == 'SUCCESS':
+            if key not in seen and status in ('SUCCESS', 'CONFIRMED'):
                 seen.add(key)
                 unique.append(res)
         return unique
