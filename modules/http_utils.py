@@ -2,11 +2,45 @@ import asyncio
 import aiohttp
 import logging
 import random
+import re
 from typing import Dict, Optional, Any
 from urllib.parse import urlparse
 
 from modules.framework_config import FrameworkConfig
 from modules.evasion import EvasionEngine, EvasionConfig
+
+#: Statuses where the server refused to hand back a representation.  Body
+#: checks against these compare an error page, never the resource, so any
+#: finding derived from them is a false positive.
+ERROR_STATUSES = frozenset({
+    400, 401, 403, 406, 407, 408, 415, 418, 421, 429,
+    500, 501, 502, 503, 504, 505, 507, 508, 510, 511,
+})
+
+_ERROR_TITLE = re.compile(
+    r'<title>\s*\d{3}\s+(?:not acceptable|forbidden|bad request|'
+    r'too many requests|service unavailable|internal server error|'
+    r'bad gateway|request timeout|unsupported media type)',
+    re.IGNORECASE)
+
+
+def is_error_page(status: Optional[int], body: str = '') -> bool:
+    """True when ``status``/``body`` is a server error page, not content.
+
+    ``404`` is deliberately *not* an error page: "the resource does not
+    exist" is a usable answer.  ``None`` (request failed) counts as one so
+    callers fall back to "no evidence".
+    """
+    if status is None:
+        return True
+    try:
+        if int(status) in ERROR_STATUSES:
+            return True
+    except (TypeError, ValueError):
+        return True
+    if body and _ERROR_TITLE.search(body[:2000]):
+        return True
+    return False
 
 
 async def make_request(

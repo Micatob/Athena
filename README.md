@@ -19,15 +19,16 @@
 9. [Operator control & preflight](#operator-control--preflight)
 10. [Post-exploitation](#post-exploitation)
 11. [AI Integration](#ai-integration)
-12. [Finding Correlation](#finding-correlation)
-13. [Rate Limiting](#rate-limiting)
-14. [Plugins](#plugins)
-15. [Reports & logs](#reports--logs)
-16. [Logging & auditability](#logging--auditability)
-17. [REST API server](#rest-api-server)
-18. [What is missing / known gaps](#what-is-missing--known-gaps)
-19. [Project layout](#project-layout)
-20. [Development](#development)
+12. [External tool bridge](#external-tool-bridge)
+13. [Finding Correlation](#finding-correlation)
+14. [Rate Limiting](#rate-limiting)
+15. [Plugins](#plugins)
+16. [Reports & logs](#reports--logs)
+17. [Logging & auditability](#logging--auditability)
+18. [REST API server](#rest-api-server)
+19. [What is missing / known gaps](#what-is-missing--known-gaps)
+20. [Project layout](#project-layout)
+21. [Development](#development)
 
 ---
 
@@ -44,6 +45,7 @@ Athena runs a complete automated penetration test against one or many targets (h
 | **Credential testing** | Login-form bruteforcing and default-credential checks against FTP, SSH, MySQL, PostgreSQL, MSSQL, Redis, Telnet |
 | **Service enumeration** | SMB (445), SNMP (161), SMTP (25) |
 | **CVE mapping** | Fingerprinted technology versions → CVE database lookup, CVSS scoring, exploit availability |
+| **External tool engine** | Nuclei (14,000+ templates) auto-detected and run inside the pipeline; findings enter the same triage/exploitation/report flow as native checks. `--list-tools`, `--no-nuclei` |
 | **Reporting** | HTML (styled security-audit report with severity cards/charts), JSON, CSV, PDF (via ReportLab/WeasyPrint) |
 | **Post-exploitation** | Foothold → enumeration → privilege escalation → lateral movement → data collection → persistence → cleanup chain, with reverse/bind/web shells and persistent sessions |
 | **Evasion** | Stealth timing, random user agents, noise headers, proxy support, Tor routing |
@@ -227,12 +229,12 @@ Athena can analyse findings with LLMs. Providers are configured in `.env`:
 ```powershell
 # .env
 ATHENA_AI_PROVIDER=groq          # gemini | groq | deepseek
-ATHENA_AI_MODEL=openai/gpt-oss-120b   # override model (Groq keys may not have Llama access)
+ATHENA_AI_MODEL=openai/gpt-oss-120b   # override model for the provider above
 GROQ_API_KEY=gsk_your_key
 GEMINI_API_KEY=your_gemini_key
 ```
 
-The model is `gemini-flash-latest` by default (a floating alias that survives Google model retirements). Set `ATHENA_AI_MODEL` in `.env` for a different model. When no key is configured every AI method returns `[]` gracefully.
+Each provider ships its own default model (`gemini-flash-latest`, `openai/gpt-oss-120b`, `deepseek-chat`). `ATHENA_AI_MODEL` applies **only** to `ATHENA_AI_PROVIDER`'s backend - a model id for one vendor would 404 on another and silently disable failover. For a specific backend use `ATHENA_AI_MODEL_GEMINI`, `ATHENA_AI_MODEL_GROQ` or `ATHENA_AI_MODEL_DEEPSEEK`. When no key is configured every AI method returns `[]` gracefully.
 
 ### 4. Output formats (`-o` / `--output`)
 
@@ -275,6 +277,8 @@ python athena.py -t TARGET -m MODE [options]
 | `-o, --output` | `html` \| `json` \| `csv` \| `pdf` \| `all` |
 | `--resume` / `--pause` | Session control |
 | `--guide` / `--list-plugins` | Docs & extension tooling |
+| `--list-tools` | Show detected external tools (nuclei binary, version, templates) and exit |
+| `--no-nuclei` | Skip the external nuclei template engine (runs automatically when installed) |
 | `--export <path>` | Custom report / guide output path |
 | `--list-stages` | List the 11 pipeline stages and their artifact contracts |
 | `--stage <key>` | Run only the given pipeline stage(s) independently (repeatable) |
@@ -508,6 +512,49 @@ print(ai.last_provider.value)   # "gemini" | "groq" | "deepseek"
 - **LLM is never the source of truth** — Deterministic tools and collected evidence remain authoritative
 - **Graceful degradation** — All methods return empty results when no API key is configured; a failing provider is bypassed via failover, never fatal
 - **Confidence scoring** — All AI statements include confidence levels and reasoning types
+
+---
+
+## External tool bridge
+
+Athena's own checks are pure Python. Where an established engine adds real
+coverage it is called through a small adapter layer (`modules/tool_bridge.py`)
+that enforces four rules:
+
+1. **Clean degradation** - a missing binary is a structured status plus one
+   console line, never a crash.
+2. **Evidence only** - a tool contributes a finding only when it produced a
+   concrete match (matched URL, matcher name, extracted value). No match, no
+   finding.
+3. **No shell** - commands are argv lists handed to `create_subprocess_exec`,
+   so target strings can never be interpreted as shell syntax.
+4. **Bounded** - every run has a wall-clock timeout, a findings cap and a
+   rate limit, and the argv is recorded in the report.
+
+### nuclei
+
+```powershell
+# Is it installed, which version, are the templates there?
+python athena.py --list-tools
+
+# Run it as part of a scan (default), or skip it
+python athena.py -t TARGET -m vuln
+python athena.py -t TARGET -m vuln --no-nuclei
+```
+
+- Auto-detects the binary on `PATH` and in `%LOCALAPPDATA%\Programs\athena\tools`
+- Auto-installs the template repository on first run if it is missing
+- Runs in `-m vuln` and `-m full` against the primary origin, after the
+  built-in scanner and before AI triage, so its hits are adjudicated and
+  attempted like any other finding
+- Severity `critical,high,medium,low,info`; excludes `dos,bruteforce,fuzz,submitit`
+- Rate limited (150 req/s, 50 in stealth) so an unthrottled template run
+  cannot trip the target's WAF mid-scan
+- Results land in the report's **External Tool Runs** section with status,
+  match count, duration and binary path
+
+nuclei itself is free and open source, no API key:
+<https://github.com/projectdiscovery/nuclei>
 
 ---
 

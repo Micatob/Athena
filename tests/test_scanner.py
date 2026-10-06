@@ -425,6 +425,10 @@ class TestSSTI:
         params = {'name': ['test']}
 
         with aioresponses() as mock_http:
+            # The evaluated value must be absent from the baseline response,
+            # otherwise a page that already shows "49" would be reported.
+            mock_http.get('http://ssti.test.local/page?name=athena',
+                          status=200, body='<html>ok</html>')
             mock_http.get(
                 re.compile(r'.*ssti\.test\.local'),
                 status=200, body='<html>49</html>', repeat=True,
@@ -495,9 +499,13 @@ class TestLDAPInjection:
         params = {'user': ['admin']}
 
         with aioresponses() as mock_http:
+            # Baseline (untouched parameter) is a small login page; only the
+            # injected request must return the large body, otherwise there is
+            # no difference to detect.
+            mock_http.get(url, status=200, body='Login form')
             mock_http.get(
                 re.compile(r'.*ldap\.test\.local'),
-                status=200, body='A' * 600, repeat=True,
+                status=200, body='A' * 700, repeat=True,
             )
             results = await scanner.test_ldap_injection(url, params)
 
@@ -513,6 +521,9 @@ class TestLDAPInjection:
         params = {'user': ['admin']}
 
         with aioresponses() as mock_http:
+            # The success marker must be absent from the baseline response,
+            # otherwise every page containing it would be a finding.
+            mock_http.get(url, status=200, body='Please sign in')
             mock_http.get(
                 re.compile(r'.*ldap2\.test\.local'),
                 status=200, body='Welcome admin', repeat=True,
@@ -556,6 +567,9 @@ class TestXPathInjection:
         params = {'category': ['books']}
 
         with aioresponses() as mock_http:
+            # Baseline stays a plain page; only the injected request returns
+            # the dashboard, so the detection has a real difference to see.
+            mock_http.get(url, status=200, body='Category list')
             mock_http.get(
                 re.compile(r'.*xpath\.test\.local'),
                 status=200, body='Welcome to the dashboard', repeat=True,

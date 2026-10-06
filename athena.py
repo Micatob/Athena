@@ -6,6 +6,7 @@ import argparse
 import html
 import threading
 import time
+from contextlib import contextmanager
 import urllib.parse
 from collections import defaultdict, deque
 from uuid import uuid4
@@ -148,6 +149,11 @@ Examples:
     exploit_group.add_argument('--exploit-delay', type=float, default=1.0,
                                help='Seconds to wait between exploit attempts (default: 1.0)')
 
+    tool_group = parser.add_argument_group('External Tools')
+    tool_group.add_argument('--no-nuclei', action='store_true',
+                            help='Skip the external nuclei template engine '
+                                 '(runs automatically when nuclei is installed)')
+
     api_group = parser.add_argument_group('REST API Server')
     api_group.add_argument('--api', action='store_true', help='Start the REST API server')
     api_group.add_argument('--api-host', help='Bind host for API server (default: SERVER_HOST or 0.0.0.0)')
@@ -211,6 +217,9 @@ Examples:
                                           'reporting')
     orchestration_group.add_argument('--list-stages', action='store_true',
                                      help='List the pipeline stages and exit')
+    orchestration_group.add_argument('--list-tools', action='store_true',
+                                     help='Show external tools (nuclei) that '
+                                          'Athena detected, then exit')
     orchestration_group.add_argument('--preflight', action='store_true',
                                      help='Explain operations before executing '
                                           '(authorization, scope, expected evidence)')
@@ -310,14 +319,17 @@ class ProgressBar:
 
 
 async def run_discovery(target: str, output_format: str = 'html',
-                         scan_types: List[str] = None, ports: List[int] = None,
-                         concurrent: int = 200, rate: int = 1000, jitter: int = 0) -> Dict[str, Any]:
+                        scan_types: List[str] = None, ports: List[int] = None,
+                        concurrent: int = 200, rate: int = 1000, jitter: int = 0,
+                        stages: List[str] = None) -> Dict[str, Any]:
+    title = ('DISCOVERY & RECONNAISSANCE'
+             if stages is None else 'RECONNAISSANCE (light)')
     print(f"\n{'='*60}")
-    print(f"  PHASE 1: DISCOVERY & RECONNAISSANCE")
+    print(f"  PHASE 1: {title}")
     print(f"{'='*60}\n")
     discovery = DiscoveryModule()
     try:
-        results = await discovery.run(target)
+        results = await discovery.run(target, stages=stages)
         print(f"  [+] Harvesting emails...")
         urls = results.get('urls', [])
         emails = await discovery.harvest_emails(target, urls)
@@ -336,6 +348,71 @@ async def run_discovery(target: str, output_format: str = 'html',
         await discovery.close()
 
 
+def _scan_targets(discovery_results: Dict[str, Any]) -> List[str]:
+    """URLs the vulnerability scanner should test, from whatever recon ran.
+
+    Returns an empty list when discovery never ran - ``run_vuln_scan``
+    then falls back to the bare target, which is the pre-recon behaviour.
+    """
+    if not isinstance(discovery_results, dict) or not discovery_results:
+        return []
+    urls: List[str] = []
+    for key in ('urls', 'security_endpoints'):
+        for entry in discovery_results.get(key) or []:
+            if isinstance(entry, str):
+                urls.append(entry)
+            elif isinstance(entry, dict) and entry.get('url'):
+                urls.append(str(entry['url']))
+    for panel in discovery_results.get('admin_panels') or []:
+        if isinstance(panel, dict) and panel.get('url'):
+            urls.append(str(panel['url']))
+    # Preserve order and drop duplicates; recon already restricts these to
+    # the target's own host.
+    return list(dict.fromkeys(urls))
+
+
+async def show_tool_status() -> None:
+    """Print the external tools Athena can call, then return."""
+    try:
+        from modules.tool_bridge import tool_status
+    except Exception as exc:  # pragma: no cover - import guard
+        print(f"[!] Tool bridge unavailable: {exc}")
+        return
+
+    print(f"{'=' * 60}")
+    print("  EXTERNAL TOOLS")
+    print(f"{'=' * 60}")
+    for tool in ('nuclei',):
+        status = await tool_status(tool)
+        if status['installed']:
+            version = status['version'] or 'unknown version'
+            print(f"  [+] {tool}: {version}")
+            print(f"      binary: {status['binary']}")
+            if tool == 'nuclei':
+                templates = status.get('templates')
+                if templates:
+                    print(f"      templates: {templates}")
+                else:
+                    print("      templates: MISSING - run: nuclei -update-templates")
+        else:
+            print(f"  [-] {tool}: not installed")
+            if tool == 'nuclei':
+                print("      install free: "
+                      "https://github.com/projectdiscovery/nuclei")
+    print("  [*] Athena runs these automatically when present; "
+          "--no-nuclei skips them.\n")
+
+
+@contextmanager
+def _phase(label: str):
+    """Console line showing how long a scan phase actually took."""
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        print(f"  [time] {label}: {time.monotonic() - t0:.1f}s")
+
+
 async def run_vuln_scan(target: str, urls: List[str] = None,
                          stealth: bool = False) -> List[Dict[str, Any]]:
     print(f"\n{'='*60}")
@@ -351,6 +428,35 @@ async def run_vuln_scan(target: str, urls: List[str] = None,
         return results
     finally:
         await scanner.close()
+
+
+async def run_external_scan(target: str, stealth: bool = False,
+                            args: argparse.Namespace = None) -> Optional[Dict[str, Any]]:
+    """Run external template engines (nuclei) and report what happened.
+
+    A missing binary prints one line and returns ``None`` - the scan then
+    continues exactly as it did before the tool bridge existed.  Findings
+    returned here use the scanner's own shape, so they join AI triage and the
+    exploitation runner untouched.
+    """
+    try:
+        from modules.tool_bridge import run_nuclei, nuclei_notice
+    except Exception as exc:  # pragma: no cover - import guard
+        print(f"  [!] Tool bridge unavailable: {exc}")
+        return None
+    try:
+        summary = await run_nuclei(
+            target,
+            rate_limit=50 if stealth else None,
+            enabled=not getattr(args, 'no_nuclei', False),
+        )
+    except Exception as exc:  # pragma: no cover - never break the scan
+        print(f"  [!] Nuclei bridge error: {exc}")
+        return None
+    notice = nuclei_notice(summary)
+    if notice:
+        print(notice)
+    return summary
 
 
 async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -503,7 +609,8 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
                     cve_results: List[VersionCVEResult] = None,
                     output_format: str = 'html', output_path: str = None,
                     ai_analysis: Dict[str, Any] = None,
-                    exploitation: Dict[str, Any] = None) -> str:
+                    exploitation: Dict[str, Any] = None,
+                    external_tools: List[Dict[str, Any]] = None) -> str:
     report_gen = ReportGenerator()
     report_data = {
         'target': target,
@@ -516,6 +623,8 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
     }
     if ai_analysis:
         report_data['ai_analysis'] = ai_analysis
+    if external_tools:
+        report_data['external_tools'] = external_tools
     if bruteforce:
         report_data['bruteforce'] = bruteforce
     if enumeration:
@@ -561,6 +670,9 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
         ok = report_gen.generate_pdf_report(report, pdf_path)
         if ok:
             print(f"  [+] PDF report: {pdf_path}")
+        else:
+            print("  [!] PDF report skipped (reportlab not installed) - "
+                  "run: pip install reportlab, or use -o html/json/csv")
 
     return output_path
 
@@ -584,17 +696,31 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
         tools = ', '.join(vinfo.get('tools', []))
         gains = vinfo.get('attacker_gains', '')
         
-        # Build confirmed findings table
+        # Per-URL detection table.  A row is only called confirmed when the
+        # exploitation runner proved it; everything else is an observation.
         confirmed_findings = vinfo.get('confirmed_findings', [])
         findings_html = ''
         if confirmed_findings:
-            findings_html = '<div class="confirmed-findings"><strong>Confirmed Findings:</strong><table class="findings-table">'
-            findings_html += '<tr><th>URL</th><th>Payload</th><th>Response</th></tr>'
+            any_verified = any(f.get('verified') for f in confirmed_findings)
+            label = ('Detection Details (confirmed rows marked)'
+                     if any_verified else 'Observations (scanner detections, '
+                                          'not actively proven)')
+            findings_html = ('<div class="confirmed-findings">'
+                             f'<strong>{label}:</strong>'
+                             '<table class="findings-table">')
+            findings_html += '<tr><th>Status</th><th>URL</th><th>Payload</th><th>Response</th></tr>'
             for finding in confirmed_findings[:10]:  # Limit to 10
+                is_verified = bool(finding.get('verified'))
+                status_html = ('<span style="color:#66bb6a;font-weight:bold;">'
+                               'CONFIRMED</span>' if is_verified else
+                               '<span style="color:#888;">observed</span>')
                 url = finding.get('url', '')
                 payload = finding.get('payload', '')
                 desc = finding.get('description', '')
-                findings_html += f'<tr><td><code>{url}</code></td><td><code>{payload}</code></td><td>{desc}</td></tr>'
+                findings_html += (f'<tr><td>{status_html}</td>'
+                                  f'<td><code>{url}</code></td>'
+                                  f'<td><code>{payload}</code></td>'
+                                  f'<td>{desc}</td></tr>')
             findings_html += '</table></div>'
         
         vuln_rows += f"""
@@ -637,9 +763,16 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
                   f"{asset_summary.get('technologies', 0)} technologies")
 
     discovery_findings = audit.get('discovery_findings', {})
+    # "not scanned" (recon phase never ran in this mode) is a different
+    # claim from "scanned, nothing found" - never conflate the two.
+    recon_ran = bool(discovery_findings.get('ran'))
+    empty_msg = ('<em>Not scanned in this mode (run -m full or -m discovery)</em>'
+                 if not recon_ran else '<em>None detected</em>')
     port_items = ''.join(f"<li>{p}</li>" for p in discovery_findings.get('open_ports', [])[:50])
     url_items = ''.join(f"<li>{html.escape(str(u))}</li>" for u in discovery_findings.get('urls', [])[:50])
     sub_items = ''.join(f"<li>{html.escape(str(s))}</li>" for s in discovery_findings.get('subdomains', [])[:50])
+    if not recon_ran:
+        tech_items = tech_items or '<em>Not scanned in this mode (run -m full or -m discovery)</em>'
 
     admin_items = ''.join(
         f"<li><strong>[{html.escape(str(p.get('panel_type', 'UNKNOWN')))}]</strong> "
@@ -713,6 +846,28 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     else:
         cve_section = ''
 
+    tools = audit.get('external_tools', []) or []
+    if tools:
+        tool_rows = ''
+        for entry in tools:
+            status = str(entry.get('status', ''))
+            matched = int(entry.get('matched', 0) or 0)
+            if status == 'executed':
+                detail = (f"{matched} template match(es) "
+                          f"(severity filter: {entry.get('severity_filter', '')})")
+            else:
+                detail = str(entry.get('reason', '') or status)
+            tool_rows += (f"<tr><td>{html.escape(str(entry.get('tool', '')))}</td>"
+                          f"<td>{html.escape(status)}</td>"
+                          f"<td>{html.escape(detail)}</td>"
+                          f"<td><code>{html.escape(str(entry.get('binary', '')))}</code></td></tr>")
+        tool_section = f"""
+    <h2>External Tool Runs</h2>
+    <table><thead><tr><th>Tool</th><th>Status</th><th>Result</th><th>Binary</th></tr></thead>
+    <tbody>{tool_rows}</tbody></table>"""
+    else:
+        tool_section = ''
+
     ai = audit.get('ai_assistant', {}) or {}
     ai_section = ''
     if ai:
@@ -727,13 +882,50 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     <h2>AI Advisory Notes</h2>
     <p>Provider: <code>{html.escape(str(ai.get('provider', '')))}</code>
        / <code>{html.escape(str(ai.get('model', '')))}</code>.
-       <strong>Advisory only</strong> - no finding was reclassified or removed by the
-       model; deterministic validation remains authoritative.
+       <strong>Advisory only</strong> - the model flags suspected false
+       positives for review; flagged findings are excluded from active
+       testing/exploitation but never deleted (see the table below).
+       Deterministic validation remains authoritative.
        Statements: {ai.get('statement_count', 0)}.
        Consolidated {ai.get('consolidation', {}).get('raw_findings', 0)} raw detections into
        {ai.get('consolidation', {}).get('unique_findings', 0)} unique findings.</p>
     {'<table><thead><tr><th>Type</th><th>URL</th><th>AI reason</th><th>Conf.</th></tr></thead><tbody>' + fp_rows + '</tbody></table>' if fp_rows else '<p><em>No false-positive hypotheses raised.</em></p>'}"""
 
+    exploit_section = ''
+    attempts = audit.get('exploitation_attempts', []) or []
+    if attempts:
+        attempt_rows = ''
+        badge = {'confirmed': '#2e7d32', 'possible': '#b8860b', 'inconclusive': '#4a4a5a'}
+        for a in attempts:
+            attempt_status = str(a.get('status', 'inconclusive'))
+            colour = badge.get(attempt_status, '#4a4a5a')
+            attempt_rows += (
+                f"<tr><td><span class=\"sev-badge\" style=\"background:{colour}\">"
+                f"{html.escape(attempt_status.upper())}</span></td>"
+                f"<td>{html.escape(str(a.get('type', '')))}</td>"
+                f"<td><code>{html.escape(str(a.get('url', '')))}</code></td>"
+                f"<td>{html.escape(str(a.get('detail', '')))}</td></tr>")
+        exploit_section = f"""
+    <h2>Automated Exploitation</h2>
+    <p>Every row below was actively re-tested by the exploitation runner
+       (scope-gated, evidence required). <strong>confirmed</strong> = the handler
+       reproduced the issue and produced proof; <strong>inconclusive</strong> =
+       no proof could be produced, treat the finding as unverified.</p>
+    <p>Attempted: <strong>{summary.get('exploitation_attempted', 0)}</strong> |
+       Confirmed: <strong>{summary.get('exploitation_confirmed', 0)}</strong> |
+       Possible: <strong>{summary.get('exploitation_possible', 0)}</strong> |
+       Inconclusive: <strong>{summary.get('exploitation_inconclusive', 0)}</strong> |
+       Demonstrations in this report: <strong>{summary.get('successful_demonstrations', 0)}</strong></p>
+    <table>
+        <thead><tr><th>Result</th><th>Type</th><th>URL</th><th>Evidence / reason</th></tr></thead>
+        <tbody>{attempt_rows}</tbody>
+    </table>"""
+    elif summary.get('exploitation_attempted', 0) == 0 and 'exploitation_attempted' in summary:
+        exploit_section = """
+    <h2>Automated Exploitation</h2>
+    <p><em>No findings were actively re-tested: nothing matched a supported
+    exploit handler, or exploitation was disabled/not authorized for this
+    target. Findings below are scanner detections only.</em></p>"""
 
     banner = ""
     trunc = summary.get('findings_truncated', {})
@@ -829,9 +1021,9 @@ li::before {{ content: "▸"; color: #00d2ff; margin-right: 8px; }}
     <table>
         <thead><tr><th>Type</th><th>Details</th></tr></thead>
         <tbody>
-            <tr><td><strong>Open Ports</strong></td><td>{port_items or '<em>None detected</em>'}</td></tr>
-            <tr><td><strong>URLs</strong></td><td>{url_items or '<em>None detected</em>'}</td></tr>
-            <tr><td><strong>Subdomains</strong></td><td>{sub_items or '<em>None detected</em>'}</td></tr>
+            <tr><td><strong>Open Ports</strong></td><td>{port_items or empty_msg}</td></tr>
+            <tr><td><strong>URLs</strong></td><td>{url_items or empty_msg}</td></tr>
+            <tr><td><strong>Subdomains</strong></td><td>{sub_items or empty_msg}</td></tr>
         </tbody>
     </table>
 
@@ -843,13 +1035,18 @@ li::before {{ content: "▸"; color: #00d2ff; margin-right: 8px; }}
 
     {cve_section}
 
+    {tool_section}
+
     <h2>Vulnerability Details</h2>
     <table>
-        <thead><tr><th>Severity</th><th>Type</th><th>Affected</th><th>Description</th></tr></thead>
+        <thead><tr><th>Severity</th><th>Type</th><th>Affected</th><th>Description</th></tr>
         <tbody>{vuln_rows}</tbody>
     </table>
 
+    {exploit_section}
+
     <h2>Remediation Recommendations</h2>
+
     {rec_items}
 
     {ai_section}
@@ -859,6 +1056,28 @@ li::before {{ content: "▸"; color: #00d2ff; margin-right: 8px; }}
 </div>
 </body>
 </html>"""
+
+
+def ai_filter_notice(original: int, kept: int, filtered: int) -> str:
+    """Console line saying exactly what AI triage did to the finding set."""
+    return (f"  [*] AI triage: {filtered} finding(s) flagged as likely false "
+            f"positives ({original} -> {kept} kept); excluded from active "
+            "testing, exploitation and attack-path analysis - full list "
+            "retained in the report")
+
+
+def ai_degraded_notice(failures: int) -> str:
+    """Console line for partial provider failures (404, rate limit, ...)."""
+    return (f"  [!] AI degraded: {failures} provider call(s) failed; "
+            "deterministic validation remains authoritative")
+
+
+def print_ai_degraded(ai_analysis: Dict[str, Any]) -> int:
+    """Emit the AI-degraded notice for an analysis run; returns the count."""
+    failures = int((ai_analysis or {}).get("provider_call_failures") or 0)
+    if failures:
+        print(ai_degraded_notice(failures))
+    return failures
 
 
 async def run_ai_analysis(target: str, discovery: Dict[str, Any],
@@ -874,11 +1093,13 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
     is configured, so AI is purely additive.
     """
     from modules.ai_integration import (AIIntegration, configured_providers,
-                                        ensemble_triage)
+                                        ensemble_triage,
+                                        provider_call_failures)
 
     engine = AIIntegration()
     if not engine.enabled:
         return {}
+    failures_seen = provider_call_failures()
 
     findings_payload = [
         {"id": str(i),
@@ -1015,7 +1236,12 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
     if len(queue) > max_lines:
         print(f"      [AI] ... and {len(queue) - max_lines} more advisory "
               "statement(s) (full list in the report)")
-    print("      [*] AI output is advisory; findings are not reclassified.")
+    print("      [*] AI output is advisory; verdicts are hypotheses. "
+          "Flagged findings are excluded from active testing, never deleted.")
+    # Every engine in this pass (including the per-provider ones created by
+    # ensemble_triage) contributes to the process-wide failure counter.
+    ai_analysis["provider_call_failures"] = max(
+        0, provider_call_failures() - failures_seen)
     return ai_analysis
 
 
@@ -1067,6 +1293,15 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
         print(f"  [+] Automated exploitation: {summary['confirmed']} confirmed, "
               f"{summary['possible']} possible, {summary['inconclusive']} inconclusive "
               f"({summary['attempted']} attempted, mode={summary['mode']})")
+        marks = {'confirmed': '+', 'possible': '~', 'inconclusive': '-'}
+        for attempt in summary.get('attempts') or []:
+            attempt_status = str(attempt.get('status', 'inconclusive'))
+            mark = marks.get(attempt_status, '-')
+            detail = str(attempt.get('detail', '')).strip()
+            print(f"      [{mark}] {attempt_status}: {attempt.get('type', '')} "
+                  f"at {attempt.get('url', '')}")
+            if detail:
+                print(f"          {detail[:300]}")
     elif status == 'denied':
         print(f"  [*] Automated exploitation skipped: {summary.get('scope_reason', '')}")
     else:
@@ -1096,28 +1331,64 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
         vulnerabilities: List[Dict[str, Any]] = []
         bruteforce_results: Dict[str, Any] = {}
         enumeration_results: Dict[str, Any] = {}
+        external_tools: List[Dict[str, Any]] = []
 
         if args.mode in ('full', 'all', 'discovery', 'recon'):
-            discovery_results = await run_discovery(
-                target, args.output, scan_types,
-                parse_ports(args.ports) if args.ports else None,
-                args.concurrent, args.rate, args.jitter
-            )
+            with _phase('discovery'):
+                discovery_results = await run_discovery(
+                    target, args.output, scan_types,
+                    parse_ports(args.ports) if args.ports else None,
+                    args.concurrent, args.rate, args.jitter
+                )
+            if args.pause:
+                input("  [*] Paused. Press Enter to continue...")
+
+        elif args.mode == 'vuln':
+            # Light recon so the scan works from a real asset inventory
+            # (crawled URLs, subdomains, ports, tech) instead of a single
+            # guessed URL - and so the report's asset table is not empty.
+            from modules.discovery import DiscoveryModule as _Disc
+            with _phase('light discovery'):
+                discovery_results = await run_discovery(
+                    target, args.output, scan_types,
+                    parse_ports(args.ports) if args.ports else None,
+                    args.concurrent, args.rate, args.jitter,
+                    stages=list(_Disc.LIGHT_STAGES),
+                )
             if args.pause:
                 input("  [*] Paused. Press Enter to continue...")
 
         if args.mode in ('full', 'all', 'vuln'):
             stealth = args.profile == 'stealth' or (args.profile is None and False)
-            vulnerabilities = await run_vuln_scan(target, discovery_results.get('urls'), stealth)
+            # Feed every URL recon actually found (crawl, admin panels,
+            # well-known endpoints) into the scanner instead of falling back
+            # to the bare target URL.
+            scan_urls = _scan_targets(discovery_results)
+            with _phase('vulnerability scan'):
+                vulnerabilities = await run_vuln_scan(target, scan_urls, stealth)
+            # External template engine (nuclei): installed -> runs against the
+            # base target (nuclei's own templates handle path discovery),
+            # missing -> one clean skip line.  Its matches are evidence-backed
+            # and go through AI triage like our own findings.
+            with _phase('nuclei'):
+                nuclei_summary = await run_external_scan(target, stealth, args)
+            if nuclei_summary:
+                external_tools.append(nuclei_summary)
+                extra = nuclei_summary.get('findings') or []
+                if extra:
+                    print(f"  [+] Nuclei contributed {len(extra)} new finding(s)")
+                    vulnerabilities = list(vulnerabilities) + list(extra)
             if args.pause:
                 input("  [*] Paused. Press Enter to continue...")
 
         if args.mode in ('full', 'all', 'bruteforce', 'recon'):
-            bruteforce_results = await run_bruteforce(target, discovery_results)
+            with _phase('bruteforce'):
+                bruteforce_results = await run_bruteforce(target, discovery_results)
 
         if args.mode in ('full', 'all', 'recon', 'discovery'):
             ports = discovery_results.get('ports', [])
-            enumeration_results = await run_enumeration(target, ports)
+            with _phase('service enumeration'):
+                enumeration_results = await run_enumeration(target, ports)
 
         cve_results = []
         if args.mode in ('full', 'all', 'recon'):
@@ -1135,16 +1406,18 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 {"mode": args.mode}
             )
             
-            # Filter out false positives identified by AI
+            # Drop findings the AI flagged as likely false positives.  The
+            # wording must match what happens: they leave the *active* set
+            # (no exploitation, no attack path) but stay in the report.
             filtered_indices = ai_analysis.get("filtered_indices", [])
             if filtered_indices:
                 original_count = len(vulnerabilities)
                 vulnerabilities = [v for i, v in enumerate(vulnerabilities) if i not in filtered_indices]
                 filtered_count = original_count - len(vulnerabilities)
                 if filtered_count > 0:
-                    print(f"  [*] AI filtered {filtered_count} potential false positives "
-                          f"({original_count} -> {len(vulnerabilities)} findings); "
-                          "full list recorded in the report")
+                    print(ai_filter_notice(original_count, len(vulnerabilities),
+                                           filtered_count))
+            print_ai_degraded(ai_analysis)
 
         # Actively verify what survived triage (scope-gated, safe mode by default)
         exploitation_summary: Optional[Dict[str, Any]] = None
@@ -1156,6 +1429,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             enumeration_results, cve_results, args.output, args.export,
             ai_analysis=ai_analysis,
             exploitation=exploitation_summary,
+            external_tools=external_tools,
         )
 
         # Hand the scan's findings to the post-exploitation stage so its
@@ -2128,6 +2402,10 @@ async def main():
             print(f'Guide exported to {path}')
         else:
             show_guide(args.guide if args.guide else None)
+        return
+
+    if getattr(args, 'list_tools', False):
+        await show_tool_status()
         return
 
     if args.list_plugins:

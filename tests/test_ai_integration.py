@@ -280,7 +280,7 @@ class TestProviderResolution:
                      "DEEPSEEK_API_KEY", "ATHENA_AI_MODEL"):
             monkeypatch.delenv(name, raising=False)
         groq = AIIntegration(provider=AIProvider.GROQ, api_key="k")
-        assert groq.model == "llama-3.3-70b-versatile"
+        assert groq.model == "openai/gpt-oss-120b"
         deepseek = AIIntegration(provider=AIProvider.DEEPSEEK, api_key="k")
         assert deepseek.model == "deepseek-chat"
         gemini = AIIntegration(api_key="k")
@@ -500,7 +500,7 @@ class TestLLMFailover:
         assert await engine._call_llm("q") == "recovered"
         assert engine.last_provider == AIProvider.GROQ
         assert captured["headers"]["Authorization"] == "Bearer groq-key"
-        assert captured["json"]["model"] == "llama-3.3-70b-versatile"
+        assert captured["json"]["model"] == "openai/gpt-oss-120b"
 
 
 class TestJSONExtraction:

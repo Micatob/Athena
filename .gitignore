@@ -33,6 +33,7 @@ test_*.log
 
 # Reports
 report_*.json
+report_*.html
 guide_*.md
 post_exploit_*.json
 

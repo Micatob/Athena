@@ -71,7 +71,10 @@ AI_PROVIDERS = {
     },
     AIProvider.GROQ: {
         "env": "GROQ_API_KEY",
-        "model": "llama-3.3-70b-versatile",
+        # Verified 2026-10-05 against this key: llama-3.3-70b-versatile and
+        # llama-3.1-8b-instant both 404 ("model not found"), which made every
+        # failover-to-Groq call die silently.
+        "model": "openai/gpt-oss-120b",
         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
         "style": "openai",
     },
@@ -210,6 +213,41 @@ def resolve_provider(api_key: str = "") -> AIProvider:
         return AIProvider.GEMINI
     available = configured_providers()
     return available[0] if available else AIProvider.GEMINI
+
+
+def resolve_model(provider: AIProvider, explicit: str = "") -> str:
+    """Model id to send for ``provider``.
+
+    Precedence: explicit argument > ``ATHENA_AI_MODEL_<PROVIDER>`` (e.g.
+    ``ATHENA_AI_MODEL_GEMINI``) > the global ``ATHENA_AI_MODEL`` > the
+    provider default.  The global override only applies to the provider the
+    scan is actually configured to use: a Groq model id posted to the Gemini
+    endpoint just 404s, which used to kill every failover attempt.
+    """
+    if explicit:
+        return explicit
+    override = _setting(f"ATHENA_AI_MODEL_{provider.value.upper()}")
+    if override:
+        return override
+    global_model = _setting("ATHENA_AI_MODEL")
+    if global_model:
+        primary = (_setting("ATHENA_AI_PROVIDER") or "").strip().lower()
+        if not primary:
+            primary = resolve_provider().value
+        if provider.value == primary:
+            return global_model
+    return AI_PROVIDERS[provider]["model"]
+
+
+#: Provider calls that exhausted retries, process-wide.  ``ensemble_triage``
+#: builds one engine per provider, so a per-instance counter alone would miss
+#: those failures and the CLI would never print its "AI degraded" notice.
+_CALL_FAILURES = 0
+
+
+def provider_call_failures() -> int:
+    """Total provider calls in this process that gave up after retries."""
+    return _CALL_FAILURES
 
 
 # ---------------------------------------------------------------------------
@@ -502,13 +540,14 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         else:
             self.provider = resolve_provider(api_key)
         self.provider_config = AI_PROVIDERS[self.provider]
-        if not model:
-            model = os.getenv("ATHENA_AI_MODEL") or self.provider_config["model"]
         self.api_key = api_key or _setting(self.provider_config["env"])
-        self.model = model
+        self.model = resolve_model(self.provider, model)
         self.logger = logging.getLogger("athena.ai")
         self._last_provider = self.provider
         self._enabled = bool(self.api_key)
+        #: Provider calls that exhausted retries (404, 5xx, ...).  Surfaced
+        #: by the CLI so a half-broken AI pass is visible instead of silent.
+        self.call_failures = 0
 
         if not self._enabled:
             self.logger.info(
@@ -560,6 +599,12 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 return text
         return None
 
+    def _model_for(self, provider: AIProvider) -> str:
+        """Model used for one hop (primary or failover) of this instance."""
+        if provider == self.provider:
+            return self.model
+        return resolve_model(provider)
+
     async def _call_llm_provider(self, provider: AIProvider,
                                  prompt: str,
                                  temperature: float = 0.3) -> Optional[str]:
@@ -570,6 +615,7 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         returns immediately so the caller can fail over to the next
         provider without waiting.
         """
+        global _CALL_FAILURES
         config = AI_PROVIDERS[provider]
         api_key = self.api_key if provider == self.provider \
             else os.getenv(config["env"], "")
@@ -597,6 +643,8 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 retryable = status in RETRYABLE_STATUS
                 if not retryable or attempt >= MAX_RATE_LIMIT_RETRIES:
                     self.logger.warning(f"LLM call failed ({provider.value}): {e}")
+                    self.call_failures += 1
+                    _CALL_FAILURES += 1
                     return None
                 delay = _retry_delay(e, attempt)
                 self.logger.info(
@@ -622,8 +670,7 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": (self.model if provider == self.provider
-                                  else config["model"]),
+                        "model": self._model_for(provider),
                         "messages": [{"role": "user",
                                       "content": prompt}],
                         "temperature": temperature,
@@ -636,8 +683,7 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 return data["choices"][0]["message"]["content"]
 
         async with httpx.AsyncClient() as client:
-            model_name = (self.model if provider == self.provider
-                          else config["model"])
+            model_name = self._model_for(provider)
             response = await client.post(
                 "https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model_name}:generateContent",

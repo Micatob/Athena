@@ -52,12 +52,12 @@ class FrameworkConfig:
     HTTP_TIMEOUT: int = int(os.getenv('HTTP_TIMEOUT', '10'))
     HTTP_MAX_RETRIES: int = int(os.getenv('HTTP_MAX_RETRIES', '3'))
     HTTP_RETRY_DELAY: float = float(os.getenv('HTTP_RETRY_DELAY', '1.0'))
-    HTTP_MAX_CONNECTIONS: int = int(os.getenv('HTTP_MAX_CONNECTIONS', '10'))
+    HTTP_MAX_CONNECTIONS: int = int(os.getenv('HTTP_MAX_CONNECTIONS', '60'))
     MAX_HOST_FAILURES: int = int(os.getenv('MAX_HOST_FAILURES', '15'))
 
     # -- Port Scanning ------------------------------------------------------
-    PORT_SCAN_TIMEOUT: int = int(os.getenv('PORT_SCAN_TIMEOUT', '5'))
-    PORT_SCAN_RETRIES: int = int(os.getenv('PORT_SCAN_RETRIES', '2'))
+    PORT_SCAN_TIMEOUT: int = int(os.getenv('PORT_SCAN_TIMEOUT', '2'))
+    PORT_SCAN_RETRIES: int = int(os.getenv('PORT_SCAN_RETRIES', '1'))
 
     # -- Stealth / Timing ---------------------------------------------------
     STEALTH_MIN_DELAY: float = float(os.getenv('STEALTH_MIN_DELAY', '0.5'))
@@ -99,8 +99,8 @@ class FrameworkConfig:
     REPORT_ALL_RESULTS: bool = os.getenv('REPORT_ALL_RESULTS', 'False').lower() == 'true'
 
     # -- Concurrency --------------------------------------------------------
-    DISCOVERY_THREADS: int = int(os.getenv('DISCOVERY_THREADS', '5'))
-    SCANNING_THREADS: int = int(os.getenv('SCANNING_THREADS', '10'))
+    DISCOVERY_THREADS: int = int(os.getenv('DISCOVERY_THREADS', '25'))
+    SCANNING_THREADS: int = int(os.getenv('SCANNING_THREADS', '40'))
     EXPLOITATION_THREADS: int = int(os.getenv('EXPLOITATION_THREADS', '5'))
     BRUTEFORCE_THREADS: int = int(os.getenv('BRUTEFORCE_THREADS', '3'))
 
@@ -203,11 +203,11 @@ class QuickConfigs:
         """Balanced – moderate speed with reasonable stealth."""
         FrameworkConfig.STEALTH_MODE = True
         FrameworkConfig.AGGRESSIVE_MODE = True
-        FrameworkConfig.STEALTH_MIN_DELAY = 0.5
-        FrameworkConfig.STEALTH_MAX_DELAY = 2.0
+        FrameworkConfig.STEALTH_MIN_DELAY = 0.1
+        FrameworkConfig.STEALTH_MAX_DELAY = 0.5
         FrameworkConfig.HTTP_TIMEOUT = 10
-        FrameworkConfig.HTTP_MAX_CONNECTIONS = 10
-        FrameworkConfig.SCANNING_THREADS = 10
+        FrameworkConfig.HTTP_MAX_CONNECTIONS = 60
+        FrameworkConfig.SCANNING_THREADS = 40
 
     @staticmethod
     def aggressive_profile() -> None:
@@ -217,8 +217,8 @@ class QuickConfigs:
         FrameworkConfig.STEALTH_MIN_DELAY = 0.05
         FrameworkConfig.STEALTH_MAX_DELAY = 0.3
         FrameworkConfig.HTTP_TIMEOUT = 5
-        FrameworkConfig.HTTP_MAX_CONNECTIONS = 25
-        FrameworkConfig.SCANNING_THREADS = 20
+        FrameworkConfig.HTTP_MAX_CONNECTIONS = 80
+        FrameworkConfig.SCANNING_THREADS = 60
         FrameworkConfig.VERBOSE_MODE = True
 
     @staticmethod

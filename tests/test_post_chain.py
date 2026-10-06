@@ -44,7 +44,13 @@ SAMPLE_SCAN = {
                   "technologies": ["Ubuntu 22.04"]},
     "bruteforce": [{"target": "http://t/login",
                     "username": "admin", "password": "admin"}],
-    "exploitation": [],
+    "exploitation": [
+        {"type": "command_injection", "status": "SUCCESS", "url": "http://t/run"},
+        {"type": "sql_injection", "status": "SUCCESS", "url": "http://t/view?id=1"},
+        {"type": "xss_reflected", "status": "SUCCESS", "url": "http://t/search"},
+        {"type": "file_inclusion", "status": "SUCCESS", "url": "http://t/page"},
+        {"type": "ssrf", "status": "SUCCESS", "url": "http://t/fetch"},
+    ],
 }
 
 
@@ -488,6 +494,8 @@ class TestRoadmap:
         report = PostExploitationAnalyzer().generate_post_exploitation_report(
             SAMPLE_SCAN)
         summary = report["summary"]
+        # SAMPLE_SCAN carries confirmed exploitation attempts, so every
+        # exploit-derived phase may publish its guidance.
         assert summary["phases_applicable"] == 8
         assert summary["actions_total"] == sum(
             len(p["actions"]) for p in report["phases"].values())
@@ -506,6 +514,16 @@ class TestRoadmap:
         assert report["summary"]["phases_total"] == 8
         assert report["summary"]["phases_applicable"] == 0
         assert report["summary"]["actions_total"] == 0
+
+    def test_unverified_scan_gates_exploit_phases(self):
+        unverified = dict(SAMPLE_SCAN, exploitation=[])
+        report = PostExploitationAnalyzer().generate_post_exploitation_report(unverified)
+        gated = PostExploitationAnalyzer.PHASE_REQUIRED_CLASS
+        for key in gated:
+            phase = report["phases"][key]
+            assert phase["applicable"] is False, key
+            assert "skip_reason" in phase, key
+        assert report["summary"]["phases_applicable"] == 8 - len(gated)
 
     @pytest.mark.asyncio
     async def test_roadmap_and_sessions_reach_report(self, engagement):
