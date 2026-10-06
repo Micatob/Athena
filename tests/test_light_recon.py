@@ -297,3 +297,28 @@ class TestRunDiscoveryPassesStages:
         monkeypatch.setattr(athena, 'DiscoveryModule', _Recorder)
         asyncio.run(athena.run_discovery('https://t'))
         assert seen['stages'] is None
+
+
+# -- discovery failure must be loud ------------------------------------------
+
+def test_discovery_health_flags_an_empty_inventory():
+    import athena
+
+    health = athena._discovery_health({})
+
+    assert health['healthy'] is False
+    assert set(health['empty']) == {'urls', 'subdomains', 'ports', 'paths',
+                                    'technologies'}
+
+
+def test_discovery_health_is_ok_when_anything_was_found():
+    import athena
+
+    assert athena._discovery_health({'urls': ['https://t/']})['healthy'] is True
+    assert athena._discovery_health({'ports': [443]})['healthy'] is True
+
+
+def test_discovery_health_handles_none():
+    import athena
+
+    assert athena._discovery_health(None)['healthy'] is False

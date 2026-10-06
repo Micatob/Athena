@@ -485,3 +485,54 @@ class TestDiscoverSecurityEndpoints:
 
         result = await discovery.discover_security_endpoints('https://example.com')
         assert result[0]['content_length'] == len('content')
+
+
+class TestResolveHost:
+    """A transient resolver failure must not abort the whole scan."""
+
+    def test_retries_then_succeeds(self, monkeypatch):
+        import asyncio
+        import modules.discovery as disc
+
+        calls = []
+
+        def flaky(host):
+            calls.append(host)
+            if len(calls) < 3:
+                raise OSError('temporary failure in name resolution')
+            return '203.0.113.9'
+
+        async def no_sleep(_delay):
+            return None
+
+        monkeypatch.setattr(disc.socket, 'gethostbyname', flaky)
+        monkeypatch.setattr(disc.asyncio, 'sleep', no_sleep)
+
+        result = asyncio.new_event_loop().run_until_complete(
+            disc.resolve_host('example.test'))
+
+        assert result == '203.0.113.9'
+        assert len(calls) == 3
+
+    def test_gives_up_after_all_attempts(self, monkeypatch):
+        import asyncio
+        import pytest
+        import modules.discovery as disc
+
+        calls = []
+
+        def always_fail(host):
+            calls.append(host)
+            raise OSError('no address')
+
+        async def no_sleep(_delay):
+            return None
+
+        monkeypatch.setattr(disc.socket, 'gethostbyname', always_fail)
+        monkeypatch.setattr(disc.asyncio, 'sleep', no_sleep)
+
+        with pytest.raises(OSError):
+            asyncio.new_event_loop().run_until_complete(
+                disc.resolve_host('example.test', attempts=2))
+
+        assert len(calls) == 2

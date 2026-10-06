@@ -394,3 +394,94 @@ python athena.py -t TARGET -m vuln --no-auto-exploit       # opt out
 python athena.py -t TARGET -m vuln --exploit-aggressive --exploit-max 5 --exploit-delay 0.5
 python -m pytest tests/test_exploitation_runner.py -q      # feature tests
 ```
+
+---
+
+# Athena Enhancement Session - 2026-10-06
+
+## Status: FEATURES BUILT AND VERIFIED — 907 passed, 1 skipped
+
+Two workstreams landed on top of the 2026-10-03 tree (`d651375`):
+
+### A. Prior uncommitted work (other session, kept intact)
+- Nuclei error accounting + scanner-disagreement flag (`errors`,
+  `corroboration`, `native_critical_high` on summaries; HTML surfaces them).
+- Bruteforce budgets (`FORM_DEADLINE_SECONDS`, `MAX_PARALLEL_ATTEMPTS`,
+  `MAX_ATTEMPTS_PER_FORM`, reachability probe, concurrent attempts).
+- Exploitation concurrency (`--exploit-concurrency`, default 6; severity-first
+  candidate selection; coverage stats `detected/candidates/coverage_pct/capped`).
+- Discovery resilience (`resolve_host` with retries, `_discovery_health` +
+  PARTIAL-run banner).
+
+### B. This session — sqlmap / dalfox / wafw00f / httpx / CISA KEV
+Per operator decision: nmap skipped (Kali-native, Athena recon already good),
+ffuf deferred to a later session (locked by test).
+
+1. **`modules/tool_bridge.py`** — four new adapters on the nuclei contract
+   (clean degradation, evidence-only, argv lists, bounded):
+   - `run_sqlmap` (300s, 1 top query-string URL, `--level 1 --risk 1`):
+     one CRITICAL finding per injectable `Parameter:` block.
+   - `run_dalfox` (300s, up to 10 URLs, stops at first confirmed XSS):
+     exit-1-with-findings treated as success; only `V` results kept (HIGH).
+   - `run_wafw00f` (60s): WAF hit = one INFO tuning finding; no WAF =
+     executed clean miss.
+   - `run_httpx` (120s, `-json -tech-detect`, old-flag fallback): zero vuln
+     findings; host records under `hosts` for recon enrichment.
+   - `SUPPORTED_TOOLS`, `TOOL_INSTALL_HINTS`, per-tool `tool_status`
+     version argv, per-tool notices + `tool_notice` dispatcher.
+   - **httpx collision guard:** dev-machine `httpx` is the Python httpx
+     package (same binary name, `Usage: httpx [OPTIONS] URL` CLI), not
+     ProjectDiscovery httpx. `_httpx_is_pd()` probes before running;
+     collision → `unavailable` with an actionable reason, and
+     `--list-tools` prints the note. No wrong flags ever sent.
+2. **NEW `modules/kev.py`** — CISA KEV enrichment: canonical feed URL,
+   24h local cache (`.athena_kev_cache.json`, gitignored, offline-safe),
+   exact case-insensitive CVE-ID match, `annotate_cve_results()` flags
+   `kev/kev_due_date/kev_name` in place + summary counts. Never raises.
+3. **`athena.py` wiring:**
+   - CLI: `--no-sqlmap/--no-dalfox/--no-wafw00f/--no-httpx/--no-kev`
+     (all default ON when installed/cached).
+   - NEW `run_extended_tools()` phase after nuclei: sqlmap + dalfox +
+     wafw00f + httpx via `asyncio.gather`, per-tool error isolation,
+     findings merged into AI triage + exploitation runner.
+   - `_merge_httpx_into_discovery()` folds unseen tech/versions into
+     discovery for CVE mapping. KEV annotation runs after `run_cve_mapping`
+     (skipped with `--no-kev`); KEV fields flow into JSON + `[KEV -
+     exploited in the wild]` HTML badges; per-tool HTML rows for the
+     External Tool Runs section; `show_tool_status()` lists all five tools.
+4. **Docs/hygiene fixes:** `tool_bridge` docstring (no longer says
+   "ffuf/sqlmap/dalfox later"), `--list-tools` help text, README external
+   tools section + flags table + KEV subsection, `.gitignore` covers
+   `.athena_kev_cache.json` + `.athena_scan_state.json`.
+5. **Tests — NEW `tests/test_external_tools.py` (34 tests):** parsers
+   (incl. sqlmap clean-miss, dalfox V-only, wafw00f INFO, httpx recon-only),
+   degradation/skip flags, httpx collision, CLI defaults, httpx enrichment,
+   HTML rows, KEV index/annotate/offline.
+
+### Verification performed
+- Full suite: **907 passed, 1 skipped** (pre-existing skip).
+- flake8 clean on new/changed ranges (`--max-line-length=140
+  --ignore=E402,W503,E203`); remaining `athena.py` F401/F811 are
+  pre-existing. Bandit: 0 High on new code (1 Medium B310 `urlopen` on the
+  hardcoded-https KEV feed, same pattern as `cve_mapper.py`; lows are the
+  codebase-standard `try/except/pass` guards).
+- Live checks: `python athena.py --help` shows the new flags;
+  `python athena.py --list-tools` reports nuclei + 3 missing + httpx
+  collision note honestly.
+
+## How to test manually
+```powershell
+python athena.py --list-tools                                  # all 5 tools + install hints
+python athena.py -t TARGET -m vuln -o json                    # all engines run when installed
+python athena.py -t TARGET -m vuln --no-sqlmap --no-dalfox --no-wafw00f --no-httpx --no-kev
+python -m pytest tests/test_external_tools.py tests/test_tool_bridge.py -q
+```
+
+## Git state
+- Remote: `https://github.com/Micatob/Athena.git`, branch `master`.
+- `.env` gitignored (real API keys never committed); `.env` still holds
+  `ATHENA_AI_PROVIDER=groq` / `GROQ_API_KEY=gsk_REDACTED` / `GEMINI_API_KEY`
+  (rotate the Gemini key — it appeared in chat history on 2026-09-27).
+- `SESSION_STATE.md` keeps keys redacted (`gsk_REDACTED`).
+- ffuf intentionally NOT integrated (deferred); nmap intentionally NOT
+  integrated (Kali-native per operator).

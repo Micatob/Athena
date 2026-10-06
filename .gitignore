@@ -37,6 +37,10 @@ report_*.html
 guide_*.md
 post_exploit_*.json
 
+# Runtime caches & scan state (regenerated, never committed)
+.athena_kev_cache.json
+.athena_scan_state.json
+
 # Docker
 .dockerignore
 

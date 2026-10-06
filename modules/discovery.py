@@ -21,6 +21,32 @@ from modules.hidden_asset_scanner import HiddenAssetScanner
 #: executor (~12 workers) is the wrong tool for blocking connects.
 PORT_SCAN_WORKERS = 64
 
+#: Resolver retries before a host is declared unresolvable.
+DNS_LOOKUP_ATTEMPTS = 3
+
+
+async def resolve_host(domain: str, attempts: int = DNS_LOOKUP_ATTEMPTS) -> str:
+    """Resolve ``domain`` with retries.
+
+    A single transient ``getaddrinfo`` failure used to abort the port scan,
+    the crawl and the subdomain stage at once while the run still reported
+    success - one flaky resolver answer silently gutted the whole discovery
+    phase.  Retries make the phase resilient and make a genuine failure
+    explicit.
+    """
+    loop = asyncio.get_event_loop()
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return str(await loop.run_in_executor(None, socket.gethostbyname, domain))
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts:
+                print(f"    [!] DNS lookup failed for {domain} "
+                      f"(attempt {attempt}/{attempts}): {exc} - retrying")
+                await asyncio.sleep(1.5 * attempt)
+    raise last_error if last_error is not None else OSError('resolution failed')
+
 
 class DiscoveryModule:
     #: Every selectable discovery stage, in execution order.  ``stages=``
@@ -698,7 +724,7 @@ class DiscoveryModule:
 
         # Resolve DNS
         try:
-            await loop.run_in_executor(None, socket.gethostbyname, domain)
+            await resolve_host(domain)
         except Exception as e:
             print(f"    [-] DNS resolution failed for {domain}: {e}")
             return []
@@ -2122,7 +2148,7 @@ class DiscoveryModule:
         results: Dict[str, Any] = {'host': domain, 'scan_types': scan_types, 'ports': {}}
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, socket.gethostbyname, domain)
+            await resolve_host(domain)
         except Exception as e:
             print(f"    [-] DNS resolution failed for {domain}: {e}")
             return results

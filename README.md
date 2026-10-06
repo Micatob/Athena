@@ -44,8 +44,8 @@ Athena runs a complete automated penetration test against one or many targets (h
 | **Vulnerability scanning** | 30+ checks: SQLi (error/time/union/boolean), XSS (reflected/stored/DOM), command injection, LFI/path traversal, SSRF, SSTI, XXE, NoSQL/LDAP/XPath injection, CSRF, CORS, JWT, cookie security, GraphQL introspection, prototype pollution, host-header injection, HTTP smuggling, cache poisoning, parameter pollution, race conditions, subdomain takeover, default credentials, security headers, API hardening, and more |
 | **Credential testing** | Login-form bruteforcing and default-credential checks against FTP, SSH, MySQL, PostgreSQL, MSSQL, Redis, Telnet |
 | **Service enumeration** | SMB (445), SNMP (161), SMTP (25) |
-| **CVE mapping** | Fingerprinted technology versions → CVE database lookup, CVSS scoring, exploit availability |
-| **External tool engine** | Nuclei (14,000+ templates) auto-detected and run inside the pipeline; findings enter the same triage/exploitation/report flow as native checks. `--list-tools`, `--no-nuclei` |
+| **CVE mapping** | Fingerprinted technology versions → CVE database lookup, CVSS scoring, exploit availability, CISA KEV cross-reference (`--no-kev` to skip) |
+| **External tool engine** | Nuclei (14,000+ templates), sqlmap (SQLi confirmation), dalfox (XSS confirmation), wafw00f (WAF fingerprint), httpx (HTTP recon enrichment) auto-detected and run inside the pipeline; evidence-backed findings enter the same triage/exploitation/report flow as native checks. `--list-tools`, `--no-nuclei`, `--no-sqlmap`, `--no-dalfox`, `--no-wafw00f`, `--no-httpx` |
 | **Reporting** | HTML (styled security-audit report with severity cards/charts), JSON, CSV, PDF (via ReportLab/WeasyPrint) |
 | **Post-exploitation** | Foothold → enumeration → privilege escalation → lateral movement → data collection → persistence → cleanup chain, with reverse/bind/web shells and persistent sessions |
 | **Evasion** | Stealth timing, random user agents, noise headers, proxy support, Tor routing |
@@ -277,8 +277,10 @@ python athena.py -t TARGET -m MODE [options]
 | `-o, --output` | `html` \| `json` \| `csv` \| `pdf` \| `all` |
 | `--resume` / `--pause` | Session control |
 | `--guide` / `--list-plugins` | Docs & extension tooling |
-| `--list-tools` | Show detected external tools (nuclei binary, version, templates) and exit |
+| `--list-tools` | Show detected external tools (binary, version, templates) and exit |
 | `--no-nuclei` | Skip the external nuclei template engine (runs automatically when installed) |
+| `--no-sqlmap` / `--no-dalfox` / `--no-wafw00f` / `--no-httpx` | Skip that engine (each runs automatically when installed) |
+| `--no-kev` | Skip CISA KEV cross-referencing of mapped CVEs (on by default, cached feed, offline-safe) |
 | `--export <path>` | Custom report / guide output path |
 | `--list-stages` | List the 11 pipeline stages and their artifact contracts |
 | `--stage <key>` | Run only the given pipeline stage(s) independently (repeatable) |
@@ -555,6 +557,38 @@ python athena.py -t TARGET -m vuln --no-nuclei
 
 nuclei itself is free and open source, no API key:
 <https://github.com/projectdiscovery/nuclei>
+
+### sqlmap / dalfox / wafw00f / httpx
+
+```powershell
+# Run as part of a scan (default when installed), or skip individually
+python athena.py -t TARGET -m vuln
+python athena.py -t TARGET -m vuln --no-sqlmap --no-dalfox
+```
+
+- **sqlmap** confirms SQL injection on the top query-string candidate URL
+  (bounded: 1 URL, `--level 1 --risk 1`, 300s cap). Confirmed parameters
+  become CRITICAL findings: <https://github.com/sqlmapproject/sqlmap>
+- **dalfox** confirms XSS over up to 10 candidate URLs (300s cap each);
+  only verified (`V`) results become HIGH findings, reflected/AST/info
+  results are ignored: <https://github.com/hahwul/dalfox>
+- **wafw00f** fingerprints the WAF in front of the target (60s cap). A hit
+  is one INFO finding used for payload/rate tuning, never a vulnerability:
+  <https://github.com/EnableSecurity/wafw00f>
+- **httpx** (ProjectDiscovery build) probes the target and folds discovered
+  technologies/versions into recon so CVE mapping sees servers the crawler
+  missed (120s cap, zero vulnerability findings):
+  <https://github.com/projectdiscovery/httpx>
+- Missing binaries print one skip line each; the scan continues unchanged.
+  `ffuf` is intentionally not integrated yet.
+
+### CISA KEV enrichment
+
+Mapped CVEs are cross-referenced against the CISA Known Exploited
+Vulnerabilities catalog (`modules/kev.py`, cached 24h in
+`.athena_kev_cache.json`, offline-safe). KEV-listed CVEs are badged
+`[KEV - exploited in the wild]` in JSON/HTML reports. Opt out with
+`--no-kev`.
 
 ---
 

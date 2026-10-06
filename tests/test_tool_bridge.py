@@ -412,3 +412,72 @@ def test_templates_present_accepts_directory_layout(tmp_path, monkeypatch):
 def test_templates_present_false_when_dir_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(tb, 'NUCLEI_TEMPLATE_DIR', str(tmp_path / 'nope'))
     assert tb._templates_present() is False
+
+
+# -- scanner disagreement / error accounting ---------------------------------
+
+def test_error_events_are_not_turned_into_findings():
+    raw = json.dumps({'template-id': 'conn-error', 'type': 'error',
+                      'error': 'connection refused',
+                      'matched-at': 'https://target.test/a'})
+    assert tb.parse_nuclei_jsonl(raw, 'https://target.test') == []
+    assert tb.count_nuclei_errors(raw) == 1
+
+
+def test_count_nuclei_errors_counts_only_error_events():
+    good = json.dumps({'template-id': 'cve-x', 'matcher-name': 'word',
+                       'info': {'severity': 'low', 'name': 'X'},
+                       'matched-at': 'https://target.test/b'})
+    bad = json.dumps({'type': 'error', 'error': 'i/o timeout'})
+    assert tb.count_nuclei_errors(good + chr(10) + bad) == 1
+    assert tb.count_nuclei_errors(good) == 0
+
+
+def test_notice_surfaces_error_count():
+    line = tb.nuclei_notice({'status': 'executed', 'matched': 0, 'errors': 3,
+                             'severity_filter': 'critical,high',
+                             'duration_s': 12.0})
+    assert '0 template match' in line
+    assert '3 error(s)' in line
+
+
+# -- tool disagreement must be visible, not averaged away --------------------
+
+def test_disagreement_flagged_when_nuclei_matches_nothing():
+    import athena
+    summary = {'status': 'executed', 'matched': 0, 'errors': 0}
+    native = [{'severity': 'CRITICAL'}, {'severity': 'HIGH'}, {'severity': 'LOW'}]
+
+    athena._flag_tool_disagreement(summary, native)
+
+    assert summary['native_critical_high'] == 2
+    assert 'disagree' in summary['corroboration']
+    assert 'unverified' in summary['corroboration']
+
+
+def test_disagreement_is_inconclusive_when_nuclei_errored():
+    import athena
+    summary = {'status': 'executed', 'matched': 0, 'errors': 7}
+
+    athena._flag_tool_disagreement(summary, [{'severity': 'CRITICAL'}])
+
+    assert 'INCONCLUSIVE' in summary['corroboration']
+    assert '7 error(s)' in summary['corroboration']
+
+
+def test_no_disagreement_flagged_on_a_clean_miss_without_native_hits():
+    import athena
+    summary = {'status': 'executed', 'matched': 0, 'errors': 0}
+
+    athena._flag_tool_disagreement(summary, [{'severity': 'LOW'}])
+
+    assert 'corroboration' not in summary
+
+
+def test_no_disagreement_flagged_when_nuclei_found_something():
+    import athena
+    summary = {'status': 'executed', 'matched': 4, 'errors': 0}
+
+    athena._flag_tool_disagreement(summary, [{'severity': 'CRITICAL'}])
+
+    assert 'corroboration' not in summary

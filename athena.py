@@ -144,15 +144,34 @@ Examples:
                                help='Skip automatic verification of detected vulnerabilities')
     exploit_group.add_argument('--exploit-aggressive', action='store_true',
                                help='Disable safe mode for automated exploitation (may cause side effects)')
-    exploit_group.add_argument('--exploit-max', type=int, default=15,
-                               help='Max findings to attempt automatically (default: 15)')
+    exploit_group.add_argument('--exploit-max', type=int, default=100,
+                               help='Max findings to verify automatically '
+                                    '(default: 100, 0 = unlimited)')
     exploit_group.add_argument('--exploit-delay', type=float, default=1.0,
                                help='Seconds to wait between exploit attempts (default: 1.0)')
+    exploit_group.add_argument('--exploit-concurrency', type=int, default=6,
+                               help='Findings verified in parallel (default: 6, '
+                                    '1 = strictly sequential)')
 
     tool_group = parser.add_argument_group('External Tools')
     tool_group.add_argument('--no-nuclei', action='store_true',
                             help='Skip the external nuclei template engine '
                                  '(runs automatically when nuclei is installed)')
+    tool_group.add_argument('--no-sqlmap', action='store_true',
+                            help='Skip sqlmap SQL-injection confirmation '
+                                 '(runs automatically when sqlmap is installed)')
+    tool_group.add_argument('--no-dalfox', action='store_true',
+                            help='Skip dalfox XSS confirmation '
+                                 '(runs automatically when dalfox is installed)')
+    tool_group.add_argument('--no-wafw00f', action='store_true',
+                            help='Skip wafw00f WAF fingerprinting '
+                                 '(runs automatically when wafw00f is installed)')
+    tool_group.add_argument('--no-httpx', action='store_true',
+                            help='Skip httpx HTTP probing/recon enrichment '
+                                 '(runs automatically when httpx is installed)')
+    tool_group.add_argument('--no-kev', action='store_true',
+                            help='Skip CISA KEV cross-referencing of mapped CVEs '
+                                 '(on by default, cached feed, offline-safe)')
 
     api_group = parser.add_argument_group('REST API Server')
     api_group.add_argument('--api', action='store_true', help='Start the REST API server')
@@ -218,7 +237,8 @@ Examples:
     orchestration_group.add_argument('--list-stages', action='store_true',
                                      help='List the pipeline stages and exit')
     orchestration_group.add_argument('--list-tools', action='store_true',
-                                     help='Show external tools (nuclei) that '
+                                     help='Show external tools (nuclei, sqlmap, '
+                                          'dalfox, wafw00f, httpx) that '
                                           'Athena detected, then exit')
     orchestration_group.add_argument('--preflight', action='store_true',
                                      help='Explain operations before executing '
@@ -371,10 +391,77 @@ def _scan_targets(discovery_results: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(urls))
 
 
+def _merge_httpx_into_discovery(discovery_results: Dict[str, Any],
+                                httpx_summary: Dict[str, Any]) -> None:
+    """Fold httpx host records into discovery (recon enrichment only).
+
+    Adds unseen technologies (with versions when httpx detected them) so
+    CVE mapping can fire on servers the crawler missed.  Never overwrites
+    existing entries and never raises.
+    """
+    try:
+        if not isinstance(discovery_results, dict) or not isinstance(httpx_summary, dict):
+            return
+        hosts = httpx_summary.get('hosts') or []
+        if not hosts:
+            return
+        techs = discovery_results.setdefault('technologies', [])
+        tech_conf = discovery_results.setdefault('technologies_with_confidence', [])
+        seen = {str(t).lower() for t in techs if isinstance(t, str)}
+        seen_conf = {(str(e.get('technology', '')).lower(), str(e.get('version', '')).lower())
+                     for e in tech_conf if isinstance(e, dict)}
+        for host in hosts:
+            if not isinstance(host, dict):
+                continue
+            ws = str(host.get('webserver') or '').strip()
+            if ws and ws.lower() not in seen:
+                techs.append(ws)
+                seen.add(ws.lower())
+            for entry in host.get('tech') or []:
+                name, _, version = str(entry).partition(' ')
+                name, version = name.strip(), version.strip()
+                if not name:
+                    continue
+                key = (name.lower(), version.lower())
+                if key in seen_conf:
+                    continue
+                seen_conf.add(key)
+                tech_conf.append({'technology': name, 'version': version, 'confidence': 2})
+                if name.lower() not in seen:
+                    techs.append(name)
+                    seen.add(name.lower())
+    except Exception:  # pragma: no cover - enrichment must not explode
+        pass
+
+
+def _discovery_health(discovery_results: Dict[str, Any]) -> Dict[str, Any]:
+    """Decide whether discovery actually produced an inventory.
+
+    A resolver outage aborts crawl, ports, subdomains and paths at once while
+    the run keeps printing stage banners, so nothing *looks* wrong unless you
+    read every ``[time]`` line.  This turns "everything empty" into a signal
+    the console and the final banner can act on.
+    """
+    results = discovery_results or {}
+    signals = {
+        'urls': len(results.get('urls') or []),
+        'subdomains': len(results.get('subdomains') or []),
+        'ports': len(results.get('ports') or results.get('open_ports') or []),
+        'paths': len(results.get('discovered_paths') or results.get('paths') or []),
+        'technologies': len(results.get('technologies') or []),
+    }
+    empty = [name for name, count in signals.items() if count == 0]
+    return {
+        'signals': signals,
+        'empty': empty,
+        'healthy': len(empty) < len(signals),
+    }
+
+
 async def show_tool_status() -> None:
     """Print the external tools Athena can call, then return."""
     try:
-        from modules.tool_bridge import tool_status
+        from modules.tool_bridge import tool_status, SUPPORTED_TOOLS, TOOL_INSTALL_HINTS
     except Exception as exc:  # pragma: no cover - import guard
         print(f"[!] Tool bridge unavailable: {exc}")
         return
@@ -382,8 +469,17 @@ async def show_tool_status() -> None:
     print(f"{'=' * 60}")
     print("  EXTERNAL TOOLS")
     print(f"{'=' * 60}")
-    for tool in ('nuclei',):
-        status = await tool_status(tool)
+    try:
+        tools = tuple(SUPPORTED_TOOLS)
+        hints = dict(TOOL_INSTALL_HINTS) if isinstance(TOOL_INSTALL_HINTS, dict) else {}
+    except Exception:  # pragma: no cover - import guard fallback
+        tools = ('nuclei',)
+        hints = {}
+    for tool in tools:
+        try:
+            status = await tool_status(tool)
+        except Exception:
+            continue
         if status['installed']:
             version = status['version'] or 'unknown version'
             print(f"  [+] {tool}: {version}")
@@ -396,11 +492,14 @@ async def show_tool_status() -> None:
                     print("      templates: MISSING - run: nuclei -update-templates")
         else:
             print(f"  [-] {tool}: not installed")
-            if tool == 'nuclei':
-                print("      install free: "
-                      "https://github.com/projectdiscovery/nuclei")
+            note = status.get('note', '')
+            if note:
+                print(f"      note: {note}")
+            hint = hints.get(tool, '')
+            if hint:
+                print(f"      {hint}")
     print("  [*] Athena runs these automatically when present; "
-          "--no-nuclei skips them.\n")
+          "--no-<tool> skips them (e.g. --no-nuclei, --no-sqlmap).\n")
 
 
 @contextmanager
@@ -431,13 +530,20 @@ async def run_vuln_scan(target: str, urls: List[str] = None,
 
 
 async def run_external_scan(target: str, stealth: bool = False,
-                            args: argparse.Namespace = None) -> Optional[Dict[str, Any]]:
+                            args: argparse.Namespace = None,
+                            native_findings: List[Dict[str, Any]] = None
+                            ) -> Optional[Dict[str, Any]]:
     """Run external template engines (nuclei) and report what happened.
 
     A missing binary prints one line and returns ``None`` - the scan then
     continues exactly as it did before the tool bridge existed.  Findings
     returned here use the scanner's own shape, so they join AI triage and the
     exploitation runner untouched.
+
+    When nuclei reports nothing while Athena reported critical/high findings,
+    the disagreement is printed and stored on the summary instead of being
+    silently averaged away - two scanners that disagree 142-to-0 means at
+    least one of them is wrong, and the operator must know which.
     """
     try:
         from modules.tool_bridge import run_nuclei, nuclei_notice
@@ -456,7 +562,137 @@ async def run_external_scan(target: str, stealth: bool = False,
     notice = nuclei_notice(summary)
     if notice:
         print(notice)
+    if summary and summary.get('status') == 'executed':
+        _flag_tool_disagreement(summary, native_findings)
     return summary
+
+
+def _flag_tool_disagreement(summary: Dict[str, Any],
+                            native_findings: List[Dict[str, Any]] = None) -> None:
+    """Print + record when nuclei and the native scanner contradict each other."""
+    if int(summary.get('matched') or 0):
+        return
+    native = [
+        f for f in (native_findings or [])
+        if isinstance(f, dict)
+        and str(f.get('severity', '')).upper() in ('CRITICAL', 'HIGH')
+    ]
+    if not native:
+        return
+
+    errors = int(summary.get('errors') or 0)
+    if errors:
+        note = (f"nuclei reported {errors} error(s) and 0 matches - "
+                f"0 matches is INCONCLUSIVE (target likely unreachable), "
+                f"not a clean miss")
+    else:
+        note = (f"nuclei matched 0 templates while Athena reported "
+                f"{len(native)} critical/high finding(s) - the scanners "
+                f"disagree; treat unproven native findings as unverified")
+    print(f"  [!] Tool disagreement: {note}")
+    summary['corroboration'] = note
+    summary['native_critical_high'] = len(native)
+
+
+async def run_extended_tools(target: str,
+                             args: argparse.Namespace = None,
+                             scan_urls: List[str] = None) -> List[Dict[str, Any]]:
+    """Run sqlmap/dalfox/wafw00f/httpx and report what happened.
+
+    Each engine is optional: a missing binary prints one skip line and the
+    scan continues exactly as before.  Evidence-backed findings (sqlmap,
+    dalfox) use the scanner's own shape so they join AI triage and the
+    exploitation runner untouched; wafw00f/httpx contribute context
+    (WAF presence, probed hosts) with zero vulnerability findings.
+
+    Never raises - a bridge error for one tool never blocks the others.
+    """
+    try:
+        from modules.tool_bridge import (
+            sqlmap_candidate_urls, tool_notice,
+            SQLMAP_MAX_URLS, DALFOX_MAX_URLS,
+        )
+    except Exception as exc:  # pragma: no cover - import guard
+        print(f"  [!] Extended tool bridge unavailable: {exc}")
+        return []
+    urls = [u for u in (scan_urls or []) if isinstance(u, str) and u.startswith(('http://', 'https://'))]
+    if target and target not in urls:
+        urls = [target] + urls
+    if not urls and target:
+        urls = [target]
+
+    sqlmap_urls = sqlmap_candidate_urls(urls, SQLMAP_MAX_URLS) if urls else ([target] if target else [])
+    dalfox_urls = [u for u in urls[:DALFOX_MAX_URLS]] if urls else ([target] if target else [])
+
+    # sqlmap probes one URL per scan (bounded runtime); dalfox fans out over
+    # up to DALFOX_MAX_URLS candidate URLs sequentially inside this phase.
+    async def _run_sqlmap_phase():
+        if not sqlmap_urls:
+            return None
+        try:
+            from modules.tool_bridge import run_sqlmap as _rs
+            return await _rs(sqlmap_urls[0],
+                             enabled=not getattr(args, 'no_sqlmap', False))
+        except Exception as exc:
+            print(f"  [!] Sqlmap bridge error: {exc}")
+            return None
+
+    async def _run_dalfox_phase():
+        results: List[Dict[str, Any]] = []
+        if not dalfox_urls:
+            return results
+        try:
+            from modules.tool_bridge import run_dalfox as _rd
+            disabled = bool(getattr(args, 'no_dalfox', False))
+            for url in dalfox_urls:
+                try:
+                    summary = await _rd(url, enabled=not disabled)
+                except Exception as exc:
+                    print(f"  [!] Dalfox bridge error: {exc}")
+                    continue
+                if summary:
+                    results.append(summary)
+                if any(int(s.get('matched', 0) or 0) > 0 for s in results):
+                    break  # one confirmed XSS is enough signal; keep phase bounded
+        except Exception as exc:  # pragma: no cover
+            print(f"  [!] Dalfox bridge error: {exc}")
+        return results
+
+    async def _run_waf_phase():
+        try:
+            from modules.tool_bridge import run_wafw00f as _rw
+            return await _rw(target, enabled=not getattr(args, 'no_wafw00f', False))
+        except Exception as exc:
+            print(f"  [!] Wafw00f bridge error: {exc}")
+            return None
+
+    async def _run_httpx_phase():
+        try:
+            from modules.tool_bridge import run_httpx as _rh
+            return await _rh(target, enabled=not getattr(args, 'no_httpx', False))
+        except Exception as exc:
+            print(f"  [!] Httpx bridge error: {exc}")
+            return None
+
+    sqlmap_summary, dalfox_list, waf_summary, httpx_summary = await asyncio.gather(
+        _run_sqlmap_phase(), _run_dalfox_phase(), _run_waf_phase(), _run_httpx_phase())
+
+    ordered: List[Dict[str, Any]] = []
+    if sqlmap_summary:
+        ordered.append(sqlmap_summary)
+    ordered.extend(dalfox_list or [])
+    if waf_summary:
+        ordered.append(waf_summary)
+    if httpx_summary:
+        ordered.append(httpx_summary)
+    for summary in ordered:
+        try:
+            notice = tool_notice(summary)
+        except Exception:
+            notice = ''
+        if notice:
+            print(notice)
+    return ordered
 
 
 async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -636,11 +872,22 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
                 'technology': r.technology, 'version': r.version,
                 'confidence': r.confidence,
                 'cves': [{'cve_id': c.cve_id, 'description': c.description,
-                          'cvss_score': c.cvss_score, 'exploit_available': c.exploit_available}
+                          'cvss_score': c.cvss_score, 'exploit_available': c.exploit_available,
+                          'kev': bool(getattr(c, 'kev', False)),
+                          'kev_due_date': getattr(c, 'kev_due_date', '') or '',
+                          'kev_name': getattr(c, 'kev_name', '') or ''}
                          for c in r.cves],
                 'max_cvss': r.max_cvss,
             })
         report_data['cve_mapping'] = cve_dicts
+        try:
+            kev_ids = [c.get('cve_id') for d in cve_dicts for c in d.get('cves', [])
+                       if isinstance(c, dict) and c.get('kev')]
+            if kev_ids:
+                report_data['kev_summary'] = {'kev_count': len(kev_ids),
+                                              'kev_ids': sorted(set(kev_ids))}
+        except Exception:
+            pass
 
     report = report_gen.generate_comprehensive_report(report_data)
 
@@ -830,17 +1077,31 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
         rows = ''
         for entry in cve_rows_list:
             cves = entry.get('cves', []) or []
-            cve_items = ''.join(
-                f"<li><code>{html.escape(str(c.get('cve_id', '')))}</code> "
-                f"(CVSS {html.escape(str(c.get('cvss_score', '')))}) - "
-                f"{html.escape(str(c.get('description', ''))[:160])}</li>"
-                for c in cves[:5]
-            )
+            cve_items = ''
+            for c in cves[:5]:
+                kev_badge = ''
+                if c.get('kev'):
+                    due = html.escape(str(c.get('kev_due_date', '')))
+                    kev_badge = (' <strong style="color:#ff4444;">[KEV - exploited in the wild'
+                                 + (f', patch due {due}' if due else '') + ']</strong>')
+                cve_items += (
+                    f"<li><code>{html.escape(str(c.get('cve_id', '')))}</code> "
+                    f"(CVSS {html.escape(str(c.get('cvss_score', '')))}) - "
+                    f"{html.escape(str(c.get('description', ''))[:160])}{kev_badge}</li>")
             rows += (f"<tr><td>{html.escape(str(entry.get('technology', '')))}</td>"
                      f"<td>{html.escape(str(entry.get('version', '')) or 'unknown')}</td>"
                      f"<td><ul>{cve_items or '<li><em>No mapped CVEs</em></li>'}</ul></td></tr>")
+        kev_note = ''
+        try:
+            kev_total = sum(1 for e in cve_rows_list for c in (e.get('cves') or []) if c.get('kev'))
+            if kev_total:
+                kev_note = (f"<p><strong style=\"color:#ff4444;\">{kev_total} CVE(s) are on the "
+                            f"CISA KEV catalog (exploited in the wild) - patch first.</strong></p>")
+        except Exception:
+            kev_note = ''
         cve_section = f"""
     <h2>CVE Mapping (version-based)</h2>
+    {kev_note}
     <table><thead><tr><th>Technology</th><th>Version</th><th>Candidate CVEs</th></tr></thead>
     <tbody>{rows}</tbody></table>"""
     else:
@@ -853,8 +1114,33 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
             status = str(entry.get('status', ''))
             matched = int(entry.get('matched', 0) or 0)
             if status == 'executed':
-                detail = (f"{matched} template match(es) "
-                          f"(severity filter: {entry.get('severity_filter', '')})")
+                tool_name = str(entry.get('tool', ''))
+                if tool_name == 'nuclei':
+                    detail = (f"{matched} template match(es) "
+                              f"(severity filter: {entry.get('severity_filter', '')})")
+                    if int(entry.get('errors') or 0):
+                        detail += (f"; {int(entry['errors'])} error(s) - "
+                                   f"unreachable templates are not a clean miss")
+                    if entry.get('corroboration'):
+                        detail += f"; {entry['corroboration']}"
+                elif tool_name == 'sqlmap':
+                    detail = (f"{matched} injectable parameter(s) "
+                              f"at {entry.get('target', '')}")
+                elif tool_name == 'dalfox':
+                    detail = (f"{matched} XSS finding(s) "
+                              f"at {entry.get('target', '')}")
+                elif tool_name == 'wafw00f':
+                    if entry.get('waf_detected'):
+                        detail = f"WAF detected: {entry.get('waf', 'unknown')}"
+                    else:
+                        detail = 'no WAF detected'
+                elif tool_name == 'httpx':
+                    probed = entry.get('hosts_probed', len(entry.get('hosts') or []))
+                    detail = f"{probed} host(s) probed (recon enrichment)"
+                else:
+                    detail = f"{matched} finding(s)"
+                    if entry.get('corroboration'):
+                        detail += f"; {entry['corroboration']}"
             else:
                 detail = str(entry.get('reason', '') or status)
             tool_rows += (f"<tr><td>{html.escape(str(entry.get('tool', '')))}</td>"
@@ -1270,9 +1556,10 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
     runner = ExploitationRunner(
         engagement=engagement,
         ai=ai_engine,
-        max_findings=getattr(args, 'exploit_max', 15),
+        max_findings=getattr(args, 'exploit_max', 100),
         delay=getattr(args, 'exploit_delay', 1.0),
         aggressive=bool(getattr(args, 'exploit_aggressive', False)),
+        concurrency=getattr(args, 'exploit_concurrency', 6),
     )
     try:
         summary = await runner.execute(target, vulnerabilities)
@@ -1284,6 +1571,9 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
             'mode': 'aggressive' if getattr(args, 'exploit_aggressive', False) else 'safe',
             'attempted': 0, 'confirmed': 0, 'possible': 0, 'inconclusive': 0,
             'attempts': [], 'duration_ms': 0,
+            'detected': len(vulnerabilities), 'candidates': 0,
+            'max_findings': getattr(args, 'exploit_max', 100),
+            'coverage_pct': 0.0, 'capped': False,
         }
     finally:
         await runner.close()
@@ -1293,6 +1583,17 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
         print(f"  [+] Automated exploitation: {summary['confirmed']} confirmed, "
               f"{summary['possible']} possible, {summary['inconclusive']} inconclusive "
               f"({summary['attempted']} attempted, mode={summary['mode']})")
+        detected = int(summary.get('detected') or 0)
+        candidates = int(summary.get('candidates') or 0)
+        coverage = summary.get('coverage_pct', 0.0)
+        if detected:
+            line = (f"  [*] Verification coverage: {summary['attempted']} of "
+                    f"{detected} detected findings ({coverage}%); "
+                    f"{candidates} had a verification handler")
+            if summary.get('capped'):
+                line += (f" - capped by --exploit-max "
+                         f"{summary.get('max_findings')}")
+            print(line)
         marks = {'confirmed': '+', 'possible': '~', 'inconclusive': '-'}
         for attempt in summary.get('attempts') or []:
             attempt_status = str(attempt.get('status', 'inconclusive'))
@@ -1332,6 +1633,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
         bruteforce_results: Dict[str, Any] = {}
         enumeration_results: Dict[str, Any] = {}
         external_tools: List[Dict[str, Any]] = []
+        scan_partial = False
 
         if args.mode in ('full', 'all', 'discovery', 'recon'):
             with _phase('discovery'):
@@ -1358,6 +1660,19 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             if args.pause:
                 input("  [*] Paused. Press Enter to continue...")
 
+        # Discovery failing quietly is the worst failure mode: the run keeps
+        # going on the default endpoint set and still prints SCAN COMPLETE.
+        if discovery_results:
+            health = _discovery_health(discovery_results)
+            if not health['healthy']:
+                scan_partial = True
+                print("\n  [!] DISCOVERY DEGRADED - nothing found for: "
+                      f"{', '.join(health['empty'])}")
+                print("  [!] Likely causes: DNS resolver failure, host "
+                      "unreachable, or request filtering.")
+                print("  [!] Later phases fall back to the target URL only. "
+                      "This run will be marked PARTIAL.\n")
+
         if args.mode in ('full', 'all', 'vuln'):
             stealth = args.profile == 'stealth' or (args.profile is None and False)
             # Feed every URL recon actually found (crawl, admin panels,
@@ -1371,13 +1686,34 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             # missing -> one clean skip line.  Its matches are evidence-backed
             # and go through AI triage like our own findings.
             with _phase('nuclei'):
-                nuclei_summary = await run_external_scan(target, stealth, args)
+                nuclei_summary = await run_external_scan(
+                    target, stealth, args, native_findings=vulnerabilities)
             if nuclei_summary:
                 external_tools.append(nuclei_summary)
                 extra = nuclei_summary.get('findings') or []
                 if extra:
                     print(f"  [+] Nuclei contributed {len(extra)} new finding(s)")
                     vulnerabilities = list(vulnerabilities) + list(extra)
+            # Optional engines (sqlmap/dalfox confirm vulns; wafw00f/httpx add
+            # context).  Missing binaries print one skip line each; findings
+            # join AI triage and the exploitation runner untouched.
+            with _phase('external tools'):
+                try:
+                    extended = await run_extended_tools(target, args, scan_urls)
+                except Exception as exc:  # pragma: no cover - never break scan
+                    print(f"  [!] Extended tools aborted: {exc}")
+                    extended = []
+            for summary in extended or []:
+                external_tools.append(summary)
+                extra = (summary.get('findings') or []) if isinstance(summary, dict) else []
+                if extra:
+                    print(f"  [+] {summary.get('tool', 'tool')} contributed "
+                          f"{len(extra)} new finding(s)")
+                    vulnerabilities = list(vulnerabilities) + list(extra)
+                # httpx enriches recon: fold probed tech into discovery so
+                # CVE mapping sees versions the crawler missed.
+                if isinstance(summary, dict) and summary.get('tool') == 'httpx':
+                    _merge_httpx_into_discovery(discovery_results, summary)
             if args.pause:
                 input("  [*] Paused. Press Enter to continue...")
 
@@ -1391,12 +1727,29 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 enumeration_results = await run_enumeration(target, ports)
 
         cve_results = []
+        kev_summary: Dict[str, Any] = {}
         if args.mode in ('full', 'all', 'recon'):
             tech_list = discovery_results.get('technologies_with_confidence', [])
             if not tech_list:
                 tech_list = [{'technology': t, 'version': '', 'confidence': 1} for t in discovery_results.get('technologies', [])]
             if tech_list:
                 cve_results = await run_cve_mapping(tech_list)
+            # CISA KEV cross-reference: flag mapped CVEs exploited in the
+            # wild (cached feed, offline-safe, opt-out with --no-kev).
+            if cve_results and not getattr(args, 'no_kev', False):
+                try:
+                    from modules.kev import load_kev_catalog, annotate_cve_results
+                    _catalog = load_kev_catalog()
+                    kev_summary = annotate_cve_results(cve_results, _catalog) or {}
+                    if int(kev_summary.get('kev_count', 0) or 0):
+                        print(f"  [+] CISA KEV: {kev_summary['kev_count']} mapped CVE(s) "
+                              f"are exploited in the wild "
+                              f"({', '.join(kev_summary.get('kev_ids', [])[:5])})")
+                except Exception as exc:  # pragma: no cover - never break scan
+                    print(f"  [!] KEV enrichment skipped: {exc}")
+            if kev_summary:
+                (discovery_results.setdefault('kev', {}).update(kev_summary)
+                 if isinstance(discovery_results, dict) else None)
 
         # Run AI analysis and filter false positives
         ai_analysis = {}
@@ -1442,10 +1795,14 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             "bruteforce": bruteforce_results or {},
             "exploitation": (exploitation_summary.get("attempts", [])
                              if isinstance(exploitation_summary, dict) else []),
+            "partial": scan_partial,
         }
 
         print(f"\n{'='*60}")
-        print(f"  SCAN COMPLETE")
+        print("  SCAN COMPLETE" + (" (PARTIAL)" if scan_partial else ""))
+        if scan_partial:
+            print("  NOTE: discovery produced no assets - see the "
+                  "DISCOVERY DEGRADED warning above.")
         print(f"  Target: {target}")
         print(f"  Report: {output_path}")
         print(f"{'='*60}\n")
