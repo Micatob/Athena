@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import os
+import re
 import json
 import argparse
 import html
@@ -27,6 +28,8 @@ from modules.orchestration import (
 )
 from modules.operation_control import OperationGate
 from modules.cleanup_manager import CleanupManager
+from modules import console as con
+from modules.console import cprint
 
 try:
     from modules.post_exploitation.orchestrator import PostOrchestrator
@@ -170,8 +173,14 @@ Examples:
                             help='Skip httpx HTTP probing/recon enrichment '
                                  '(runs automatically when httpx is installed)')
     tool_group.add_argument('--no-kev', action='store_true',
-                            help='Skip CISA KEV cross-referencing of mapped CVEs '
-                                 '(on by default, cached feed, offline-safe)')
+                             help='Skip CISA KEV cross-referencing of mapped CVEs '
+                                  '(on by default, cached feed, offline-safe)')
+
+    display_group = parser.add_argument_group('Display')
+    display_group.add_argument('--no-color', action='store_true',
+                               help='Plain console output (no ANSI colors). '
+                                    'Colors also auto-disable when piped to a '
+                                    'file or when NO_COLOR is set')
 
     api_group = parser.add_argument_group('REST API Server')
     api_group.add_argument('--api', action='store_true', help='Start the REST API server')
@@ -290,7 +299,7 @@ def resolve_targets(args) -> List[str]:
     if args.target_file:
         targets.extend(load_targets_from_file(args.target_file))
     if not targets:
-        print("[!] No target specified. Use -t TARGET or -f TARGET_FILE")
+        cprint("[!] No target specified. Use -t TARGET or -f TARGET_FILE")
         sys.exit(1)
     normalized = []
     for t in targets:
@@ -336,7 +345,7 @@ class ProgressBar:
         if self.pbar:
             self.pbar.update(n)
         else:
-            print(f"  [*] {self.desc}: {n}/{self.total}", end='\r')
+            cprint(f"  [*] {self.desc}: {n}/{self.total}", end='\r')
 
     def close(self):
         if self.pbar:
@@ -349,62 +358,60 @@ async def run_discovery(target: str, output_format: str = 'html',
                         stages: List[str] = None) -> Dict[str, Any]:
     title = ('DISCOVERY & RECONNAISSANCE'
              if stages is None else 'RECONNAISSANCE (light)')
-    print(f"\n{'='*60}")
-    print(f"  PHASE 1: {title}")
-    print(f"{'='*60}\n")
+    con.phase(f"PHASE 1: {title}")
     discovery = DiscoveryModule()
     try:
         results = await discovery.run(target, stages=stages)
-        print(f"  [+] Harvesting emails...")
+        cprint(f"  [+] Harvesting emails...")
         urls = results.get('urls', [])
         emails = await discovery.harvest_emails(target, urls)
         if emails:
             results['emails'] = emails
-            print(f"  [+] Emails harvested: {len(emails)}")
+            cprint(f"  [+] Emails harvested: {len(emails)}")
             for e in emails[:5]:
                 try:
-                    print(f"      - {e.get('email')} (from {e.get('source','')[:60]})")
+                    cprint(f"      - {e.get('email')} (from {e.get('source','')[:60]})")
                 except Exception:
                     pass
         else:
-            print(f"  [*] Emails: none found in first {min(len(urls),30)} pages")
+            cprint(f"  [*] Emails: none found in first {min(len(urls),30)} pages")
         # Always surface DNS/TLS/hidden-asset summaries (were silent 0.2s/0.5s/31s)
         try:
             _dns = results.get('dns_records') or {}
             if _dns:
                 _ip = _dns.get('ip') or (', '.join(_dns.get('a_records', [])[:2]) if _dns.get('a_records') else 'n/a')
-                print(f"  [+] DNS: {_dns.get('domain','')} -> {_ip} | MX:{len(_dns.get('mx_records',[]))} "
+                cprint(f"  [+] DNS: {_dns.get('domain','')} -> {_ip} | MX:{len(_dns.get('mx_records',[]))} "
                       f"TXT:{len(_dns.get('txt_records',[]))} NS:{len(_dns.get('ns_records',[]))}")
                 if _dns.get('spf_analysis'):
-                    print(f"      SPF: {_dns.get('spf_analysis')}")
+                    cprint(f"      SPF: {_dns.get('spf_analysis')}")
                 if _dns.get('dmarc_analysis'):
-                    print(f"      DMARC: {_dns.get('dmarc_analysis')}")
+                    cprint(f"      DMARC: {_dns.get('dmarc_analysis')}")
             _tls = results.get('tls_certificate') or {}
             if _tls:
                 if _tls.get('issues'):
                     for iss in _tls['issues'][:3]:
-                        print(f"  [!] TLS: {iss}")
+                        cprint(f"  [!] TLS: {iss}")
                 else:
-                    print(f"  [+] TLS: {_tls.get('version','?')} cipher={_tls.get('cipher','?')} "
+                    cprint(f"  [+] TLS: {_tls.get('version','?')} cipher={_tls.get('cipher','?')} "
                           f"expiry={_tls.get('valid_until','?')}")
             _ha = results.get('hidden_assets') or {}
             if _ha:
-                print(f"  [+] Hidden assets: {len(_ha.get('hidden_directories',[]))} dirs, "
+                cprint(f"  [+] Hidden assets: {len(_ha.get('hidden_directories',[]))} dirs, "
                       f"{len(_ha.get('backup_files',[]))} backups, "
                       f"{len(_ha.get('sensitive_files',[]))} sensitive")
             elif stages is None or 'hidden_assets' in (stages or []):
-                print(f"  [*] Hidden assets: none confirmed (see wildcard-filtered counts above)")
+                cprint(f"  [*] Hidden assets: none confirmed (see wildcard-filtered counts above)")
             _lh = results.get('listing_harvest') or {}
             if _lh.get('findings'):
-                print(f"  [+] Listing harvest: {len(_lh['findings'])} file(s) "
+                cprint(f"  [+] Listing harvest: {len(_lh['findings'])} file(s) "
                       f"content-confirmed from {len(_lh.get('listings', []))} open "
                       f"listing(s) ({_lh.get('files_seen', 0)} files seen)")
             _sec = results.get('security_endpoints') or []
-            print(f"  [+] Security endpoints: {len(_sec)} reachable (robots/security.txt/sitemap)")
+            cprint(f"  [+] Security endpoints: {len(_sec)} reachable (robots/security.txt/sitemap)")
         except Exception:
             pass
         if scan_types:
-            print(f"  [+] Advanced port scanning ({', '.join(scan_types)})...")
+            cprint(f"  [+] Advanced port scanning ({', '.join(scan_types)})...")
             adv_ports = ports or None
             adv_results = await discovery.scan_ports_advanced(
                 target, scan_types=scan_types, ports=adv_ports,
@@ -416,7 +423,7 @@ async def run_discovery(target: str, output_format: str = 'html',
                 _basic = results.get('ports') or []
                 _adv_ports = (adv_results.get('ports') or {}) if isinstance(adv_results, dict) else {}
                 _adv_open = sum(1 for v in _adv_ports.values() if any(x.get('open') for x in v.values())) if _adv_ports else 0
-                print(f"  [*] Port reconciliation: basic={len(_basic) if isinstance(_basic,list) else _basic} "
+                cprint(f"  [*] Port reconciliation: basic={len(_basic) if isinstance(_basic,list) else _basic} "
                       f"advanced_tcp={_adv_open} (UDP-only 53 explains deltas; trust union)")
             except Exception:
                 pass
@@ -524,16 +531,14 @@ async def run_waf_gate(target: str, args=None) -> Dict[str, Any]:
     and payloads are tuned before a single injection is sent.
     Never raises — a failed gate means 'unknown', never a crash.
     """
-    print(f"\n{'='*60}")
-    print(f"  PHASE 0: WAF GATE (runs first)")
-    print(f"{'='*60}\n")
+    con.phase("PHASE 0: WAF GATE (runs first)")
     waf_info: Dict[str, Any] = {'verdict': 'unknown', 'waf': '', 'tuning': ''}
     try:
         from modules.waf_detector import detect_waf, waf_notice
         waf_info = await detect_waf(target)
-        print(waf_notice(waf_info))
+        cprint(waf_notice(waf_info))
     except Exception as exc:
-        print(f"  [!] Native WAF gate failed: {exc}")
+        cprint(f"  [!] Native WAF gate failed: {exc}")
         waf_info = {'verdict': 'unknown', 'waf': '', 'tuning': str(exc)[:200]}
     # wafw00f enrichment when installed (tuning signal, not a vuln)
     try:
@@ -542,7 +547,7 @@ async def run_waf_gate(target: str, args=None) -> Dict[str, Any]:
             summary = await run_wafw00f(target, enabled=True)
             notice = wafw00f_notice(summary)
             if notice:
-                print(notice)
+                cprint(notice)
             if isinstance(summary, dict) and summary.get('status') == 'executed':
                 waf_info['wafw00f'] = summary
                 if summary.get('waf_detected') and waf_info.get('verdict') == 'none':
@@ -550,9 +555,9 @@ async def run_waf_gate(target: str, args=None) -> Dict[str, Any]:
                     waf_info['waf'] = summary.get('waf', 'WAF (wafw00f)')
                     waf_info['tuning'] = ('wafw00f fingerprinted a WAF — '
                                           'low-rate + bypass payloads apply.')
-                    print(f"  [!] WAF gate upgraded to LIKELY via wafw00f: {waf_info['waf']}")
+                    cprint(f"  [!] WAF gate upgraded to LIKELY via wafw00f: {waf_info['waf']}")
     except Exception as exc:
-        print(f"  [*] wafw00f enrichment skipped: {exc}")
+        cprint(f"  [*] wafw00f enrichment skipped: {exc}")
     # Tune global scan behaviour up-front
     try:
         verdict = str(waf_info.get('verdict', ''))
@@ -566,7 +571,7 @@ async def run_waf_gate(target: str, args=None) -> Dict[str, Any]:
                 _FC.SCANNING_THREADS = min(int(getattr(_FC, 'SCANNING_THREADS', 40)), 20)
             except Exception:
                 pass
-            print(f"  [*] Scan tuned for WAF: stealth ON, delays "
+            cprint(f"  [*] Scan tuned for WAF: stealth ON, delays "
                   f"{_FC.STEALTH_MIN_DELAY}-{_FC.STEALTH_MAX_DELAY}s, "
                   f"threads<={getattr(_FC, 'SCANNING_THREADS', 20)}")
     except Exception:
@@ -579,12 +584,12 @@ async def show_tool_status() -> None:
     try:
         from modules.tool_bridge import tool_status, SUPPORTED_TOOLS, TOOL_INSTALL_HINTS
     except Exception as exc:  # pragma: no cover - import guard
-        print(f"[!] Tool bridge unavailable: {exc}")
+        cprint(f"[!] Tool bridge unavailable: {exc}")
         return
 
-    print(f"{'=' * 60}")
-    print("  EXTERNAL TOOLS")
-    print(f"{'=' * 60}")
+    cprint(f"{'=' * 60}")
+    cprint("  EXTERNAL TOOLS")
+    cprint(f"{'=' * 60}")
     try:
         tools = tuple(SUPPORTED_TOOLS)
         hints = dict(TOOL_INSTALL_HINTS) if isinstance(TOOL_INSTALL_HINTS, dict) else {}
@@ -598,23 +603,23 @@ async def show_tool_status() -> None:
             continue
         if status['installed']:
             version = status['version'] or 'unknown version'
-            print(f"  [+] {tool}: {version}")
-            print(f"      binary: {status['binary']}")
+            cprint(f"  [+] {tool}: {version}")
+            cprint(f"      binary: {status['binary']}")
             if tool == 'nuclei':
                 templates = status.get('templates')
                 if templates:
-                    print(f"      templates: {templates}")
+                    cprint(f"      templates: {templates}")
                 else:
-                    print("      templates: MISSING - run: nuclei -update-templates")
+                    cprint("      templates: MISSING - run: nuclei -update-templates")
         else:
-            print(f"  [-] {tool}: not installed")
+            cprint(f"  [-] {tool}: not installed")
             note = status.get('note', '')
             if note:
-                print(f"      note: {note}")
+                cprint(f"      note: {note}")
             hint = hints.get(tool, '')
             if hint:
-                print(f"      {hint}")
-    print("  [*] Athena runs these automatically when present; "
+                cprint(f"      {hint}")
+    cprint("  [*] Athena runs these automatically when present; "
           "--no-<tool> skips them (e.g. --no-nuclei, --no-sqlmap).\n")
 
 
@@ -625,17 +630,15 @@ def _phase(label: str):
     try:
         yield
     finally:
-        print(f"  [time] {label}: {time.monotonic() - t0:.1f}s")
+        cprint(f"  [time] {label}: {time.monotonic() - t0:.1f}s")
 
 
 async def run_vuln_scan(target: str, urls: List[str] = None,
                          stealth: bool = False,
                          waf_info: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-    print(f"\n{'='*60}")
-    print(f"  PHASE 2: VULNERABILITY SCANNING")
-    print(f"{'='*60}\n")
+    con.phase("PHASE 2: VULNERABILITY SCANNING")
     if waf_info and str(waf_info.get('verdict', '')) in ('confirmed', 'likely', 'hard-block'):
-        print(f"  [*] Vuln scan WAF-aware: {waf_info.get('waf','WAF')} "
+        cprint(f"  [*] Vuln scan WAF-aware: {waf_info.get('waf','WAF')} "
               f"({waf_info.get('verdict')}) — bypass payloads + low rate")
         stealth = True
     if not urls:
@@ -669,7 +672,7 @@ async def run_external_scan(target: str, stealth: bool = False,
     try:
         from modules.tool_bridge import run_nuclei, nuclei_notice
     except Exception as exc:  # pragma: no cover - import guard
-        print(f"  [!] Tool bridge unavailable: {exc}")
+        cprint(f"  [!] Tool bridge unavailable: {exc}")
         return None
     try:
         # Profile-aware nuclei rate: stealth=50 (quiet), balanced=150,
@@ -691,11 +694,11 @@ async def run_external_scan(target: str, stealth: bool = False,
             enabled=not getattr(args, 'no_nuclei', False),
         )
     except Exception as exc:  # pragma: no cover - never break the scan
-        print(f"  [!] Nuclei bridge error: {exc}")
+        cprint(f"  [!] Nuclei bridge error: {exc}")
         return None
     notice = nuclei_notice(summary)
     if notice:
-        print(notice)
+        cprint(notice)
     if summary and summary.get('status') == 'executed':
         _flag_tool_disagreement(summary, native_findings)
     return summary
@@ -723,9 +726,30 @@ def _flag_tool_disagreement(summary: Dict[str, Any],
         note = (f"nuclei matched 0 templates while Athena reported "
                 f"{len(native)} critical/high finding(s) - the scanners "
                 f"disagree; treat unproven native findings as unverified")
-    print(f"  [!] Tool disagreement: {note}")
+    cprint(f"  [!] Tool disagreement: {note}")
     summary['corroboration'] = note
     summary['native_critical_high'] = len(native)
+
+
+async def _quick_reachable(url: str, timeout: float = 10.0) -> bool:
+    """One cheap GET to decide whether fan-out engines should even start.
+
+    A host already blocking us answers with timeouts/refusals; hammering it
+    with 10 more dalfox runs only extends the block and burns scan time.
+    Any HTTP status (including WAF 403 or server 500) counts as reachable:
+    the host answered. Only network errors/timeouts count as unreachable.
+    """
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                headers={'User-Agent': 'Mozilla/5.0 Athena-reachability-check'}) as session:
+            async with session.get(url, ssl=False,
+                                   allow_redirects=True) as resp:
+                await resp.read()
+                return True
+    except Exception:
+        return False
 
 
 async def run_extended_tools(target: str,
@@ -747,7 +771,7 @@ async def run_extended_tools(target: str,
             SQLMAP_MAX_URLS, DALFOX_MAX_URLS,
         )
     except Exception as exc:  # pragma: no cover - import guard
-        print(f"  [!] Extended tool bridge unavailable: {exc}")
+        cprint(f"  [!] Extended tool bridge unavailable: {exc}")
         return []
     urls = [u for u in (scan_urls or []) if isinstance(u, str) and u.startswith(('http://', 'https://'))]
     if target and target not in urls:
@@ -758,23 +782,38 @@ async def run_extended_tools(target: str,
     sqlmap_urls = sqlmap_candidate_urls(urls, SQLMAP_MAX_URLS) if urls else ([target] if target else [])
     dalfox_urls = [u for u in urls[:DALFOX_MAX_URLS]] if urls else ([target] if target else [])
 
+    # Reachability gate: a host already blocking us (timeouts/refusals) gets
+    # no 10-URL dalfox fan-out - that only extends the block. wafw00f/httpx
+    # still try their single probe each below.
+    reachable = await _quick_reachable(target) if target else True
+    if target and not reachable:
+        cprint(f"  [*] Target not answering (timeout/refused) - sqlmap/dalfox "
+               f"fan-out skipped to avoid hammering a blocking host")
+    _skip = {'tool': '', 'status': 'skipped', 'binary': '',
+             'reason': 'target unreachable - fan-out skipped', 'findings': [],
+             'matched': 0, 'duration_s': 0.0, 'argv': []}
+
     # sqlmap probes one URL per scan (bounded runtime); dalfox fans out over
     # up to DALFOX_MAX_URLS candidate URLs sequentially inside this phase.
     async def _run_sqlmap_phase():
         if not sqlmap_urls:
             return None
+        if not reachable:
+            return {**_skip, 'tool': 'sqlmap'}
         try:
             from modules.tool_bridge import run_sqlmap as _rs
             return await _rs(sqlmap_urls[0],
                              enabled=not getattr(args, 'no_sqlmap', False))
         except Exception as exc:
-            print(f"  [!] Sqlmap bridge error: {exc}")
+            cprint(f"  [!] Sqlmap bridge error: {exc}")
             return None
 
     async def _run_dalfox_phase():
         results: List[Dict[str, Any]] = []
         if not dalfox_urls:
             return results
+        if not reachable:
+            return [{**_skip, 'tool': 'dalfox'}]
         try:
             from modules.tool_bridge import run_dalfox as _rd
             disabled = bool(getattr(args, 'no_dalfox', False))
@@ -782,14 +821,14 @@ async def run_extended_tools(target: str,
                 try:
                     summary = await _rd(url, enabled=not disabled)
                 except Exception as exc:
-                    print(f"  [!] Dalfox bridge error: {exc}")
+                    cprint(f"  [!] Dalfox bridge error: {exc}")
                     continue
                 if summary:
                     results.append(summary)
                 if any(int(s.get('matched', 0) or 0) > 0 for s in results):
                     break  # one confirmed XSS is enough signal; keep phase bounded
         except Exception as exc:  # pragma: no cover
-            print(f"  [!] Dalfox bridge error: {exc}")
+            cprint(f"  [!] Dalfox bridge error: {exc}")
         return results
 
     async def _run_waf_phase():
@@ -797,7 +836,7 @@ async def run_extended_tools(target: str,
             from modules.tool_bridge import run_wafw00f as _rw
             return await _rw(target, enabled=not getattr(args, 'no_wafw00f', False))
         except Exception as exc:
-            print(f"  [!] Wafw00f bridge error: {exc}")
+            cprint(f"  [!] Wafw00f bridge error: {exc}")
             return None
 
     async def _run_httpx_phase():
@@ -805,7 +844,7 @@ async def run_extended_tools(target: str,
             from modules.tool_bridge import run_httpx as _rh
             return await _rh(target, enabled=not getattr(args, 'no_httpx', False))
         except Exception as exc:
-            print(f"  [!] Httpx bridge error: {exc}")
+            cprint(f"  [!] Httpx bridge error: {exc}")
             return None
 
     sqlmap_summary, dalfox_list, waf_summary, httpx_summary = await asyncio.gather(
@@ -820,6 +859,13 @@ async def run_extended_tools(target: str,
         _statuses = {str(s.get('status', '')) for s in dalfox_list}
         if _statuses <= {'unavailable', 'disabled', 'skipped'}:
             ordered.append(dalfox_list[0])
+        elif all(str(s.get('status')) == 'executed'
+                 and int(s.get('matched', 0) or 0) == 0 for s in dalfox_list):
+            # Repeated clean misses / unresponsive hosts: one summary row
+            # with the probe count, not ten identical lines.
+            _first = dict(dalfox_list[0])
+            _first['urls_probed'] = len(dalfox_list)
+            ordered.append(_first)
         else:
             # Keep executed/failed runs (they carry per-URL evidence)
             ordered.extend([s for s in dalfox_list if str(s.get('status')) not in ('unavailable', 'disabled', 'skipped')]
@@ -834,14 +880,12 @@ async def run_extended_tools(target: str,
         except Exception:
             notice = ''
         if notice:
-            print(notice)
+            cprint(notice)
     return ordered
 
 
 async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) -> Dict[str, Any]:
-    print(f"\n{'='*60}")
-    print(f"  PHASE 3: BRUTEFORCING & AUTH TESTING")
-    print(f"{'='*60}\n")
+    con.phase("PHASE 3: BRUTEFORCING & AUTH TESTING")
     results: Dict[str, Any] = {'web_logins': [], 'service_creds': [], 'default_creds': [],
                                'admin_panels': [], 'spray_lockouts': []}
     login_forms = (discovery_results or {}).get('login_forms', [])
@@ -857,10 +901,10 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
     filtered_forms = [f for f in regular_login_forms if not any(kw in f.get('url', '').lower() for kw in ['register', 'signup', 'forgot', 'reset', 'create'])]
     
     if admin_login_forms:
-        print(f"  [*] HIGH-VALUE TARGETS: {len(admin_login_forms)} admin panel login forms (cPanel/Webmail/WHM)")
+        cprint(f"  [*] HIGH-VALUE TARGETS: {len(admin_login_forms)} admin panel login forms (cPanel/Webmail/WHM)")
         for i, form in enumerate(admin_login_forms, 1):
             source = form.get('source', 'UNKNOWN')
-            print(f"      {i}. [{source}] {form['url']}")
+            cprint(f"      {i}. [{source}] {form['url']}")
     
     if admin_panels:
         # Dedupe: normalize trailing slash + case so /webmail, /webmail/,
@@ -877,35 +921,35 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
             except Exception:
                 continue
         if len(_deduped) != len(admin_panels):
-            print(f"  [*] Deduplicated admin panels: {len(admin_panels)} -> {len(_deduped)} unique")
+            cprint(f"  [*] Deduplicated admin panels: {len(admin_panels)} -> {len(_deduped)} unique")
         admin_panels = _deduped
-        print(f"  [*] Discovered {len(admin_panels)} unique admin panels:")
+        cprint(f"  [*] Discovered {len(admin_panels)} unique admin panels:")
         results['admin_panels'] = admin_panels
         for panel in admin_panels[:15]:
             panel_type = panel.get('panel_type', 'UNKNOWN')
-            print(f"      - [{panel_type}] {panel['url']} (HTTP {panel['status']})")
+            cprint(f"      - [{panel_type}] {panel['url']} (HTTP {panel['status']})")
         if len(admin_panels) > 15:
-            print(f"      ... and {len(admin_panels)-15} more (see HTML report)")
+            cprint(f"      ... and {len(admin_panels)-15} more (see HTML report)")
     
     # Combine: admin panels first, then filtered regular forms
     all_forms = admin_login_forms + filtered_forms
     
     if all_forms:
-        print(f"\n  [*] Bruteforcing {len(all_forms)} login forms ({len(admin_login_forms)} admin, {len(filtered_forms)} regular)...")
+        cprint(f"\n  [*] Bruteforcing {len(all_forms)} login forms ({len(admin_login_forms)} admin, {len(filtered_forms)} regular)...")
         
         # Use AI to analyze and prioritize forms
         from modules.ai_integration import AIIntegration
         ai_engine = AIIntegration()
         
         if ai_engine.enabled:
-            print(f"  [*] AI analyzing target priority ({ai_engine.provider.value})...")
+            cprint(f"  [*] AI analyzing target priority ({ai_engine.provider.value})...")
             try:
                 prioritized = await ai_engine.prioritize_bruteforce_targets(all_forms)
                 if prioritized:
                     all_forms = prioritized
-                    print(f"  [+] AI prioritized targets for optimal efficiency")
+                    cprint(f"  [+] AI prioritized targets for optimal efficiency")
             except Exception as e:
-                print(f"  [-] AI prioritization failed, using default order: {e}")
+                cprint(f"  [-] AI prioritization failed, using default order: {e}")
         
         bf = BruteforceModule()
         try:
@@ -913,7 +957,7 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
             # sequential attempts, 4-9s gaps, lockout abort, session-verified
             # success. Fast parallel hammering only earns an IP ban.
             if admin_login_forms:
-                print(f"\n  [*] Phase 3a: Slow credential spray on admin panels "
+                cprint(f"\n  [*] Phase 3a: Slow credential spray on admin panels "
                       f"(anti-lockout: sequential, 4-9s gaps, session-verified hits)...")
                 spray = await bf.slow_spray(admin_login_forms)
                 results['web_logins'].extend(spray.get('credentials', []))
@@ -921,15 +965,15 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
                 _st = spray.get('stats', {})
                 _ncreds = len(spray.get('credentials', []))
                 _nlock = len(spray.get('lockouts', []))
-                print(f"  [*] Spray summary: {_st.get('attempts', 0)} attempt(s), "
+                cprint(f"  [*] Spray summary: {_st.get('attempts', 0)} attempt(s), "
                       f"{_st.get('forms', 0)} form(s), {_ncreds} verified success(es), "
                       f"{_nlock} lockout(s)")
                 if _nlock:
-                    print(f"  [!] Panel lockout active — remaining guesses must wait "
+                    cprint(f"  [!] Panel lockout active — remaining guesses must wait "
                           f"for the block to lift (manual retry, do not re-spray)")
 
             if filtered_forms:
-                print(f"\n  [*] Phase 3b: Standard bruteforce on regular login forms...")
+                cprint(f"\n  [*] Phase 3b: Standard bruteforce on regular login forms...")
                 creds = await bf.bruteforce_login_forms(filtered_forms)
                 results['web_logins'].extend(creds)
         finally:
@@ -938,11 +982,11 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
         # Distinguish "0 forms found (WAF-blind)" from "forms filtered".
         # Old message claimed registration-filtering when there was nothing.
         if not login_forms:
-            print(f"  [*] No login forms captured (crawler WAF-blocked on 403; "
+            cprint(f"  [*] No login forms captured (crawler WAF-blocked on 403; "
                   f"see [!] WAF warning above). High-value panels above remain manual targets - "
                   f"no automated credential attempts made (safe-mode, no false bruteforce).")
         else:
-            print(f"  [*] No login forms to bruteforce after filtering registration/signup/forgot forms "
+            cprint(f"  [*] No login forms to bruteforce after filtering registration/signup/forgot forms "
                   f"({len(login_forms)} raw forms seen, {len(filtered_forms)} after filter)")
 
     host = target.replace('https://', '').replace('http://', '').split('/')[0].split(':')[0]
@@ -969,36 +1013,34 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
                 try:
                     anon = await service_bf.check_anonymous(host, port, service)
                     if anon.get('anonymous'):
-                        print(f"    [+] ANONYMOUS {service.upper()} on {host}:{port} — {anon.get('detail')}")
+                        cprint(f"    [+] ANONYMOUS {service.upper()} on {host}:{port} — {anon.get('detail')}")
                         results['anonymous_findings'].append(anon)
                     else:
-                        print(f"  [*] {service.upper()} {host}:{port}: {anon.get('detail','no anon access')}")
+                        cprint(f"  [*] {service.upper()} {host}:{port}: {anon.get('detail','no anon access')}")
                 except Exception as exc:
-                    print(f"  [*] {service.upper()} anon check skipped on {port}: {exc}")
+                    cprint(f"  [*] {service.upper()} anon check skipped on {port}: {exc}")
             # 2. TLS-aware default-credential test (STARTTLS/implicit-TLS inside)
             transport = ''
             if service in ('smtp', 'pop3', 'imap'):
                 transport = ' (TLS-aware: STARTTLS/implicit-TLS)'
-            print(f"  [*] Checking default credentials on {service}://{host}:{port}{transport}")
+            cprint(f"  [*] Checking default credentials on {service}://{host}:{port}{transport}")
             try:
                 creds = await service_bf.bruteforce_service(host, port, service, ['root', 'admin'], ['root', 'admin'])
             except Exception as exc:
-                print(f"    [-] {service} bruteforce error on {port}: {exc}")
+                cprint(f"    [-] {service} bruteforce error on {port}: {exc}")
                 continue
             results['service_creds'].extend(creds)
             for c in creds:
                 if c.success:
-                    print(f"    [+] Default credentials found: {c.username}:{c.password} on {service} ({host}:{port})")
+                    cprint(f"    [+] Default credentials found: {c.username}:{c.password} on {service} ({host}:{port})")
     if not any(p in ports for p in port_service_map):
-        print(f"  [*] No bruteforceable services among open ports {sorted(ports)[:20]} — web-form phase above is authoritative")
+        cprint(f"  [*] No bruteforceable services among open ports {sorted(ports)[:20]} — web-form phase above is authoritative")
 
     return results
 
 
 async def run_enumeration(target: str, ports: List[int] = None) -> Dict[str, Any]:
-    print(f"\n{'='*60}")
-    print(f"  PHASE: ENUMERATION")
-    print(f"{'='*60}\n")
+    con.phase("PHASE: ENUMERATION")
     results: Dict[str, Any] = {}
     host = target.replace('https://', '').replace('http://', '').split('/')[0].split(':')[0]
     port_map = {445: 'smb', 161: 'snmp', 25: 'smtp', 587: 'smtp', 465: 'smtp', 139: 'smb',
@@ -1011,40 +1053,40 @@ async def run_enumeration(target: str, ports: List[int] = None) -> Dict[str, Any
             # (bug: last SMTP port wiped earlier results, report showed No).
             key = f"{service}_{port}" if service in ('smtp', 'pop3', 'imap') else (service or f"port_{port}")
             if service == 'smb':
-                print(f"  [*] SMB enumeration on {host}:{port}")
+                cprint(f"  [*] SMB enumeration on {host}:{port}")
                 smb = SMBEnumerator()
                 results[key] = await smb.enumerate(host, port)
                 if results[key].get('accessible'):
-                    print(f"    [+] SMB accessible: {results[key].get('os_version', 'unknown')}")
+                    cprint(f"    [+] SMB accessible: {results[key].get('os_version', 'unknown')}")
             elif service == 'snmp':
-                print(f"  [*] SNMP enumeration on {host}:{port}")
+                cprint(f"  [*] SNMP enumeration on {host}:{port}")
                 snmp = SNMPEnumerator()
                 results[key] = await snmp.enumerate(host, port)
                 if results[key].get('accessible'):
-                    print(f"    [+] SNMP accessible, community: {results[key].get('community', 'N/A')}")
+                    cprint(f"    [+] SNMP accessible, community: {results[key].get('community', 'N/A')}")
             elif service == 'smtp':
-                print(f"  [*] SMTP enumeration on {host}:{port}")
+                cprint(f"  [*] SMTP enumeration on {host}:{port}")
                 smtp = SMTPEnumerator()
                 results[key] = await smtp.enumerate(host, port)
                 if results[key].get('accessible'):
-                    print(f"    [+] SMTP accessible ({results[key].get('transport', 'plain')}): {results[key].get('banner', '')[:60]}")
+                    cprint(f"    [+] SMTP accessible ({results[key].get('transport', 'plain')}): {results[key].get('banner', '')[:60]}")
                 # Back-compat alias: keep 'smtp' pointing at first accessible one
                 if results[key].get('accessible') and not results.get('smtp', {}).get('accessible'):
                     results['smtp'] = results[key]
             elif service == 'pop3':
-                print(f"  [*] POP3 enumeration on {host}:{port}")
+                cprint(f"  [*] POP3 enumeration on {host}:{port}")
                 pop3 = POP3Enumerator()
                 results[key] = await pop3.enumerate(host, port)
                 if results[key].get('accessible'):
-                    print(f"    [+] POP3 accessible: {results[key].get('banner', '')[:60]}")
+                    cprint(f"    [+] POP3 accessible: {results[key].get('banner', '')[:60]}")
                 if results[key].get('accessible') and not results.get('pop3', {}).get('accessible'):
                     results['pop3'] = results[key]
             elif service == 'imap':
-                print(f"  [*] IMAP enumeration on {host}:{port}")
+                cprint(f"  [*] IMAP enumeration on {host}:{port}")
                 imap = IMAPEnumerator()
                 results[key] = await imap.enumerate(host, port)
                 if results[key].get('accessible'):
-                    print(f"    [+] IMAP accessible: {results[key].get('banner', '')[:60]}")
+                    cprint(f"    [+] IMAP accessible: {results[key].get('banner', '')[:60]}")
                 if results[key].get('accessible') and not results.get('imap', {}).get('accessible'):
                     results['imap'] = results[key]
 
@@ -1052,36 +1094,34 @@ async def run_enumeration(target: str, ports: List[int] = None) -> Dict[str, Any
 
 
 async def run_cve_mapping(technologies: List[Dict[str, Any]]) -> List[VersionCVEResult]:
-    print(f"\n{'='*60}")
-    print(f"  PHASE: CVE MAPPING")
-    print(f"{'='*60}\n")
+    con.phase("PHASE: CVE MAPPING")
     if not technologies:
-        print(f"  [*] CVE mapping: no versioned technologies to map (tech detection empty)")
+        cprint(f"  [*] CVE mapping: no versioned technologies to map (tech detection empty)")
         return []
     try:
         _names = ', '.join([f"{t.get('technology','?')} {t.get('version','')}".strip() for t in technologies[:8]])
-        print(f"  [*] Mapping {len(technologies)} technologies: {_names}")
+        cprint(f"  [*] Mapping {len(technologies)} technologies: {_names}")
     except Exception:
         pass
-    print(f"  [*] Live NVD lookup: CPE match first, keyword fallback "
+    cprint(f"  [*] Live NVD lookup: CPE match first, keyword fallback "
           f"(rate-limited 5 req/30s; set NVD_API_KEY for 50/30s)")
     mapper = CVEMapper()
     results = await mapper.map_versions(technologies)
     _with = sum(1 for r in results if r.cves)
     for r in results:
         if r.cves:
-            print(f"  [+] {r.technology} {r.version}: {len(r.cves)} CVEs (max CVSS: {r.max_cvss})")
+            cprint(f"  [+] {r.technology} {r.version}: {len(r.cves)} CVEs (max CVSS: {r.max_cvss})")
             for cve in r.cves[:3]:
-                print(f"      - {cve.cve_id}: {cve.description[:80]}...")
+                cprint(f"      - {cve.cve_id}: {cve.description[:80]}...")
     if not results:
-        print(f"  [*] CVE mapping: no versioned technologies detected "
+        cprint(f"  [*] CVE mapping: no versioned technologies detected "
               f"(banner strings without versions cannot be mapped reliably)")
     elif not _with:
-        print(f"  [*] CVE mapping: 0 CVEs for {len(results)} versioned technology(ies) "
+        cprint(f"  [*] CVE mapping: 0 CVEs for {len(results)} versioned technology(ies) "
               f"(live NVD queried; a clean result means no published matches, "
               f"not 'DB too small')")
     else:
-        print(f"  [+] CVE mapping: {_with}/{len(results)} technologies matched, "
+        cprint(f"  [+] CVE mapping: {_with}/{len(results)} technologies matched, "
               f"{sum(len(r.cves) for r in results)} total candidate CVEs (live NVD + curated)")
     return results
 
@@ -1197,25 +1237,25 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
         html_path = f"{output_path}.html"
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
-        print(f"  [+] HTML report: {html_path}")
+        cprint(f"  [+] HTML report: {html_path}")
 
     if output_format in ('json', 'all'):
         json_path = f"{output_path}.json"
         report_gen.export_to_json(report, json_path)
-        print(f"  [+] JSON report: {json_path}")
+        cprint(f"  [+] JSON report: {json_path}")
 
     if output_format in ('csv', 'all'):
         csv_path = f"{output_path}.csv"
         report_gen.export_to_csv(report_data, csv_path)
-        print(f"  [+] CSV report: {csv_path}")
+        cprint(f"  [+] CSV report: {csv_path}")
 
     if output_format in ('pdf', 'all'):
         pdf_path = f"{output_path}.pdf"
         ok = report_gen.generate_pdf_report(report, pdf_path)
         if ok:
-            print(f"  [+] PDF report: {pdf_path}")
+            cprint(f"  [+] PDF report: {pdf_path}")
         else:
-            print("  [!] PDF report skipped (reportlab not installed) - "
+            cprint("  [!] PDF report skipped (reportlab not installed) - "
                   "run: pip install reportlab, or use -o html/json/csv")
 
     return output_path
@@ -1842,7 +1882,7 @@ def print_ai_degraded(ai_analysis: Dict[str, Any]) -> int:
     """Emit the AI-degraded notice for an analysis run; returns the count."""
     failures = int((ai_analysis or {}).get("provider_call_failures") or 0)
     if failures:
-        print(ai_degraded_notice(failures))
+        cprint(ai_degraded_notice(failures))
     return failures
 
 
@@ -1867,6 +1907,9 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
         return {}
     failures_seen = provider_call_failures()
 
+    # A single None upstream (failed merge) must never kill AI triage
+    # with AttributeError — same crash class as the reporting dedup fix.
+    _clean_vulns = [v for v in (vulnerabilities or []) if isinstance(v, dict)]
     findings_payload = [
         {"id": str(i),
          "title": str(v.get("title") or v.get("type") or "finding"),
@@ -1874,9 +1917,9 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
          "severity": v.get("severity", ""), "url": v.get("url", ""),
          "payload": v.get("payload", ""),
          "description": str(v.get("description", ""))[:300]}
-        for i, v in enumerate(vulnerabilities)
+        for i, v in enumerate(_clean_vulns)
     ]
-    print(f"\n  [*] AI-assisted analysis ({engine.provider.value}:{engine.model}) ...")
+    cprint(f"\n  [*] AI-assisted analysis ({engine.provider.value}:{engine.model}) ...")
 
     # Consolidate identical detections (same type + URL) before any LLM call:
     # a full scan emits thousands of raw rows for a handful of distinct
@@ -1931,7 +1974,7 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
     # One false-positive pass over the consolidated findings.  The ensemble
     # (one call per configured provider) only earns its extra API budget
     # when more than a single provider is configured.
-    print(f"  [*] Validating {len(consolidated)} consolidated findings "
+    cprint(f"  [*] Validating {len(consolidated)} consolidated findings "
           f"(from {len(findings_payload)} raw detections) for false positives...")
     validated = await engine.validate_findings(consolidated)
     if validated:
@@ -1942,15 +1985,16 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
             position = stmt.metadata.get("finding_index")
             _record_false_positive(position, stmt, "validation")
             raw_indices = _expand(position)
-            sample = (vulnerabilities[raw_indices[0]]
-                      if raw_indices else {})
+            _raw = (_clean_vulns[raw_indices[0]]
+                    if raw_indices and raw_indices[0] < len(_clean_vulns) else {})
+            sample = _raw if isinstance(_raw, dict) else {}
             if fp_printed < 10:
-                print(f"      [AI-FP] Potential false positive: "
+                cprint(f"      [AI-FP] Potential false positive: "
                       f"{sample.get('type')} at {sample.get('url')}")
                 fp_printed += 1
         hidden_fp = len(validated.statements) - fp_printed
         if hidden_fp > 0:
-            print(f"      [AI-FP] ... and {hidden_fp} more hypothesis/FP "
+            cprint(f"      [AI-FP] ... and {hidden_fp} more hypothesis/FP "
                   "statement(s) (full list in the report)")
         ai_analysis["validated_findings"] = [
             s.to_dict() for s in validated.statements
@@ -1998,11 +2042,11 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
     )
     max_lines = 15
     for label, stmt in queue[:max_lines]:
-        print(f"      {label} {stmt.content[:150]}")
+        cprint(f"      {label} {stmt.content[:150]}")
     if len(queue) > max_lines:
-        print(f"      [AI] ... and {len(queue) - max_lines} more advisory "
+        cprint(f"      [AI] ... and {len(queue) - max_lines} more advisory "
               "statement(s) (full list in the report)")
-    print("      [*] AI output is advisory; verdicts are hypotheses. "
+    cprint("      [*] AI output is advisory; verdicts are hypotheses. "
           "Flagged findings are excluded from active testing, never deleted.")
     # Every engine in this pass (including the per-provider ones created by
     # ensemble_triage) contributes to the process-wide failure counter.
@@ -2021,6 +2065,25 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
     reported as a denied/skipped summary, not a crash.
     """
     from modules.exploitation_runner import ExploitationRunner
+
+    # Reachability gate: verifying findings against a host that already
+    # blocks us burns request_timeout per finding (40s x N) for nothing but
+    # timeout lines. Skip with one honest line instead.
+    if target and not await _quick_reachable(target):
+        cprint(f"  [*] Automated exploitation skipped: target not answering "
+               f"(timeout/refused) - verification deferred to avoid hammering "
+               f"a blocking host")
+        return {
+            'status': 'denied',
+            'scope_reason': ('target unreachable (timeout/refused) - '
+                             'verification skipped'),
+            'mode': 'aggressive' if getattr(args, 'exploit_aggressive', False) else 'safe',
+            'attempted': 0, 'confirmed': 0, 'possible': 0, 'inconclusive': 0,
+            'attempts': [], 'duration_ms': 0,
+            'detected': len(vulnerabilities or []), 'candidates': 0,
+            'max_findings': getattr(args, 'exploit_max', 100),
+            'coverage_pct': 0.0, 'capped': False,
+        }
 
     engagement = _resolve_exploitation_engagement(target, args)
 
@@ -2044,7 +2107,7 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
     try:
         summary = await runner.execute(target, vulnerabilities)
     except Exception as exc:
-        print(f"[!] Automated exploitation aborted: {exc}")
+        cprint(f"[!] Automated exploitation aborted: {exc}")
         summary = {
             'status': 'denied',
             'scope_reason': f'automated exploitation failed: {exc}',
@@ -2060,7 +2123,7 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
 
     status = summary.get('status')
     if status == 'executed':
-        print(f"  [+] Automated exploitation: {summary['confirmed']} confirmed, "
+        cprint(f"  [+] Automated exploitation: {summary['confirmed']} confirmed, "
               f"{summary['possible']} possible, {summary['inconclusive']} inconclusive "
               f"({summary['attempted']} attempted, mode={summary['mode']})")
         detected = int(summary.get('detected') or 0)
@@ -2073,20 +2136,22 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
             if summary.get('capped'):
                 line += (f" - capped by --exploit-max "
                          f"{summary.get('max_findings')}")
-            print(line)
+            cprint(line)
         marks = {'confirmed': '+', 'possible': '~', 'inconclusive': '-'}
-        for attempt in summary.get('attempts') or []:
+        _attempts = [a for a in (summary.get('attempts') or [])
+                     if isinstance(a, dict)]
+        for attempt in _attempts:
             attempt_status = str(attempt.get('status', 'inconclusive'))
             mark = marks.get(attempt_status, '-')
             detail = str(attempt.get('detail', '')).strip()
-            print(f"      [{mark}] {attempt_status}: {attempt.get('type', '')} "
+            cprint(f"      [{mark}] {attempt_status}: {attempt.get('type', '')} "
                   f"at {attempt.get('url', '')}")
             if detail:
-                print(f"          {detail[:300]}")
+                cprint(f"          {detail[:300]}")
     elif status == 'denied':
-        print(f"  [*] Automated exploitation skipped: {summary.get('scope_reason', '')}")
+        cprint(f"  [*] Automated exploitation skipped: {summary.get('scope_reason', '')}")
     else:
-        print("  [*] Automated exploitation: no supported findings to attempt")
+        cprint("  [*] Automated exploitation: no supported findings to attempt")
 
     return summary
 
@@ -2101,12 +2166,11 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
     state = ScanState.load() if args.resume else None
 
     for target in targets:
-        print(f"\n{'='*60}")
-        print(f"  ATHENA SECURITY SUITE")
-        print(f"  Target: {target}")
-        print(f"  Profile: {args.profile or os.getenv('AETHELRED_PROFILE', 'balanced')}")
-        print(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*60}\n")
+        con.phase("ATHENA SECURITY SUITE")
+        cprint(f"  Target: {target}")
+        cprint(f"  Profile: {args.profile or os.getenv('AETHELRED_PROFILE', 'balanced')}")
+        cprint(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        cprint(f"{'='*60}\n")
 
         discovery_results: Dict[str, Any] = {}
         vulnerabilities: List[Dict[str, Any]] = []
@@ -2153,11 +2217,11 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             health = _discovery_health(discovery_results)
             if not health['healthy']:
                 scan_partial = True
-                print("\n  [!] DISCOVERY DEGRADED - nothing found for: "
+                cprint("\n  [!] DISCOVERY DEGRADED - nothing found for: "
                       f"{', '.join(health['empty'])}")
-                print("  [!] Likely causes: DNS resolver failure, host "
+                cprint("  [!] Likely causes: DNS resolver failure, host "
                       "unreachable, or request filtering.")
-                print("  [!] Later phases fall back to the target URL only. "
+                cprint("  [!] Later phases fall back to the target URL only. "
                       "This run will be marked PARTIAL.\n")
 
         if args.mode in ('full', 'all', 'vuln'):
@@ -2175,7 +2239,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             # Directory-listing harvest: files proven by content-sniff join
             # the finding set as CONFIRMED (HTTP 200 + magic/marker proof),
             # so the report shows real disclosed files, not leads.
-            _harvest = (discovery_results.get('listing_harvest') or {}).get('findings') or []
+            _harvest = [h for h in ((discovery_results.get('listing_harvest') or {}).get('findings') or []) if isinstance(h, dict)]
             if _harvest:
                 for _i, _hf in enumerate(_harvest, 1):
                     _ev = str(_hf.get('evidence', ''))
@@ -2194,7 +2258,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                         'payload': '',
                         'source': 'listing_harvest',
                     })
-                print(f"  [+] Listing harvest: {len(_harvest)} content-confirmed "
+                cprint(f"  [+] Listing harvest: {len(_harvest)} content-confirmed "
                       f"file(s) added as verified findings")
             # External template engine (nuclei): installed -> runs against the
             # base target (nuclei's own templates handle path discovery),
@@ -2206,9 +2270,10 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             if nuclei_summary:
                 external_tools.append(nuclei_summary)
                 extra = nuclei_summary.get('findings') or []
+                extra = [v for v in extra if isinstance(v, dict)]
                 if extra:
-                    print(f"  [+] Nuclei contributed {len(extra)} new finding(s)")
-                    vulnerabilities = list(vulnerabilities) + list(extra)
+                    cprint(f"  [+] Nuclei contributed {len(extra)} new finding(s)")
+                    vulnerabilities = list(vulnerabilities or []) + list(extra)
             # Optional engines (sqlmap/dalfox confirm vulns; wafw00f/httpx add
             # context).  Missing binaries print one skip line each; findings
             # join AI triage and the exploitation runner untouched.
@@ -2216,15 +2281,17 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 try:
                     extended = await run_extended_tools(target, args, scan_urls)
                 except Exception as exc:  # pragma: no cover - never break scan
-                    print(f"  [!] Extended tools aborted: {exc}")
+                    cprint(f"  [!] Extended tools aborted: {exc}")
                     extended = []
             for summary in extended or []:
+                if not isinstance(summary, dict):
+                    continue
                 external_tools.append(summary)
-                extra = (summary.get('findings') or []) if isinstance(summary, dict) else []
+                extra = [v for v in (summary.get('findings') or []) if isinstance(v, dict)]
                 if extra:
-                    print(f"  [+] {summary.get('tool', 'tool')} contributed "
+                    cprint(f"  [+] {summary.get('tool', 'tool')} contributed "
                           f"{len(extra)} new finding(s)")
-                    vulnerabilities = list(vulnerabilities) + list(extra)
+                    vulnerabilities = list(vulnerabilities or []) + list(extra)
                 # httpx enriches recon: fold probed tech into discovery so
                 # CVE mapping sees versions the crawler missed.
                 if isinstance(summary, dict) and summary.get('tool') == 'httpx':
@@ -2263,11 +2330,11 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                     _catalog = load_kev_catalog()
                     kev_summary = annotate_cve_results(cve_results, _catalog) or {}
                     if int(kev_summary.get('kev_count', 0) or 0):
-                        print(f"  [+] CISA KEV: {kev_summary['kev_count']} mapped CVE(s) "
+                        cprint(f"  [+] CISA KEV: {kev_summary['kev_count']} mapped CVE(s) "
                               f"are exploited in the wild "
                               f"({', '.join(kev_summary.get('kev_ids', [])[:5])})")
                 except Exception as exc:  # pragma: no cover - never break scan
-                    print(f"  [!] KEV enrichment skipped: {exc}")
+                    cprint(f"  [!] KEV enrichment skipped: {exc}")
             if kev_summary:
                 (discovery_results.setdefault('kev', {}).update(kev_summary)
                  if isinstance(discovery_results, dict) else None)
@@ -2289,7 +2356,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 vulnerabilities = [v for i, v in enumerate(vulnerabilities) if i not in filtered_indices]
                 filtered_count = original_count - len(vulnerabilities)
                 if filtered_count > 0:
-                    print(ai_filter_notice(original_count, len(vulnerabilities),
+                    cprint(ai_filter_notice(original_count, len(vulnerabilities),
                                            filtered_count))
             print_ai_degraded(ai_analysis)
 
@@ -2319,19 +2386,18 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             "partial": scan_partial,
         }
 
-        print(f"\n{'='*60}")
-        print("  SCAN COMPLETE" + (" (PARTIAL)" if scan_partial else ""))
+        con.phase("SCAN COMPLETE" + (" (PARTIAL)" if scan_partial else ""))
         if scan_partial:
-            print("  NOTE: discovery produced no assets - see the "
+            cprint("  NOTE: discovery produced no assets - see the "
                   "DISCOVERY DEGRADED warning above.")
-        print(f"  Target: {target}")
-        print(f"  Report: {output_path}")
-        print(f"{'='*60}\n")
+        cprint(f"  Target: {target}")
+        cprint(f"  Report: {output_path}")
+        cprint(f"{'='*60}\n")
 
 
 async def run_post_exploitation(targets: List[str], args: argparse.Namespace) -> None:
     if not HAS_POST:
-        print("[!] Post-exploitation modules not available. Check installation.")
+        cprint("[!] Post-exploitation modules not available. Check installation.")
         return
 
     engagement = _resolve_engagement(targets, args)
@@ -2356,8 +2422,9 @@ async def run_post_exploitation(targets: List[str], args: argparse.Namespace) ->
                 interval=args.post_payload_interval,
             )
         except ValueError as exc:
-            print(f"[!] {exc}")
+            cprint(f"[!] {exc}")
             return
+        # Raw print: payloads are copy-pasted, ANSI would corrupt them.
         print(f"# Reconnecting {args.post_payload} reverse payload for "
               f"{args.post_host}:{args.post_port} "
               f"({args.post_payload_retries} retries x "
@@ -2374,35 +2441,35 @@ async def run_post_exploitation(targets: List[str], args: argparse.Namespace) ->
     if args.post_list_sessions:
         sessions = orchestrator.session_mgr.list()
         if not sessions:
-            print("No saved sessions.")
+            cprint("No saved sessions.")
             return
         for s in sessions:
-            print(f"  {s.id}: {s.target} [{s.platform.value}] {s.user.username} ({s.state.value})")
+            cprint(f"  {s.id}: {s.target} [{s.platform.value}] {s.user.username} ({s.state.value})")
         return
 
     if args.post_shell == "reverse":
-        print(f"[*] Starting reverse shell listener on {args.post_host}:{args.post_port}")
+        cprint(f"[*] Starting reverse shell listener on {args.post_host}:{args.post_port}")
         await orchestrator.start_listener(args.post_host, args.post_port)
-        print("[*] Waiting for an inbound shell "
+        cprint("[*] Waiting for an inbound shell "
               f"(up to {args.post_wait:g}s; use --post-payload to print a "
               "reconnecting payload)")
         session = await orchestrator.session_mgr.wait_for_session(
             timeout=max(0.0, float(args.post_wait or 10.0)))
         if not session:
-            print(f"[!] No session received within {args.post_wait:g}s. "
+            cprint(f"[!] No session received within {args.post_wait:g}s. "
                   "Use --post-interactive after a session connects.")
             return
-        print(f"[+] Session {session.id} received from {session.target}")
+        cprint(f"[+] Session {session.id} received from {session.target}")
         if engagement is not None and not _enforce_session_scope(orchestrator, session,
                                                                  engagement):
             return
 
     elif args.post_shell == "bind":
         if not targets:
-            print("[!] Need target for bind shell connection")
+            cprint("[!] Need target for bind shell connection")
             return
         target = targets[0].replace("https://", "").replace("http://", "").split("/")[0]
-        print(f"[*] Connecting to bind shell at {target}:{args.post_port}")
+        cprint(f"[*] Connecting to bind shell at {target}:{args.post_port}")
         session = await _register_scoped_bind(orchestrator, target, args, engagement)
         if not session:
             return
@@ -2410,18 +2477,18 @@ async def run_post_exploitation(targets: List[str], args: argparse.Namespace) ->
     elif args.post_shell == "web":
         url = args.post_web_url or targets[0] if targets else ""
         if not url:
-            print("[!] Need --post-web-url for web shell")
+            cprint("[!] Need --post-web-url for web shell")
             return
         session = await _register_scoped_web(orchestrator, url, args, engagement)
         if not session:
             return
-        print(f"[+] Web shell registered: {url}")
+        cprint(f"[+] Web shell registered: {url}")
     else:
         if not targets:
-            print("[!] No target specified for post-exploitation")
+            cprint("[!] No target specified for post-exploitation")
             return
         if engagement is None:
-            print("[!] No engagement could be established for post-exploitation; "
+            cprint("[!] No engagement could be established for post-exploitation; "
                   "failing closed. Provide --scope-file or --engagement-id, "
                   "or a --target to build an explicit ad-hoc scope.")
             return
@@ -2435,49 +2502,49 @@ async def run_post_exploitation(targets: List[str], args: argparse.Namespace) ->
         return
 
     manual = args.post_manual
-    print(f"\n{'='*60}")
-    print(f"  POST-EXPLOITATION CHAIN")
-    print(f"  Session: {session.id} | Target: {session.target}")
+    cprint(f"\n{'='*60}")
+    cprint(f"  POST-EXPLOITATION CHAIN")
+    cprint(f"  Session: {session.id} | Target: {session.target}")
     if engagement is not None:
-        print(f"  Engagement: {engagement.id} ({engagement.name})")
-    print(f"{'='*60}\n")
+        cprint(f"  Engagement: {engagement.id} ({engagement.name})")
+    cprint(f"{'='*60}\n")
 
     results = await orchestrator.run_full_chain(session, interactive=manual, manual_mode=manual)
 
     report = orchestrator.generate_report(session.id)
-    print(f"\n{'='*60}")
-    print(f"  POST-EXPLOITATION COMPLETE")
-    print(f"  Sessions succeeded: {report['phases_succeeded']}/{report['phases_completed']}")
-    print(f"  Critical findings: {len(report['critical_findings'])}")
-    print(f"  Root obtained: {report['is_root']}")
-    print(f"  Live sessions: {report.get('sessions_total', 1)}")
+    cprint(f"\n{'='*60}")
+    cprint(f"  POST-EXPLOITATION COMPLETE")
+    cprint(f"  Sessions succeeded: {report['phases_succeeded']}/{report['phases_completed']}")
+    cprint(f"  Critical findings: {len(report['critical_findings'])}")
+    cprint(f"  Root obtained: {report['is_root']}")
+    cprint(f"  Live sessions: {report.get('sessions_total', 1)}")
     if report.get("edr_policy", {}).get("edr_detected"):
         suppressed = report["edr_policy"].get("suppressed", [])
-        print(f"  EDR detected - suppressed: {', '.join(suppressed) or 'none'}")
+        cprint(f"  EDR detected - suppressed: {', '.join(suppressed) or 'none'}")
     roadmap = report.get("roadmap") or {}
     summary = roadmap.get("summary") or {}
     if summary:
-        print(f"  Roadmap: {summary.get('phases_applicable', 0)}/"
+        cprint(f"  Roadmap: {summary.get('phases_applicable', 0)}/"
               f"{summary.get('phases_total', 0)} applicable phase(s), "
               f"{summary.get('actions_total', 0)} action(s) "
               f"({summary.get('actions_by_execution', {}).get('automated', 0)} "
               f"automatable)")
-    print(f"{'='*60}\n")
+    cprint(f"{'='*60}\n")
 
     if report.get("sessions"):
-        print("  Tracked sessions:")
+        cprint("  Tracked sessions:")
         for row in report["sessions"]:
             parent = f" <- {row['parent_session']}" if row.get("parent_session") else ""
-            print(f"    {row['id']}  {row['target']}  [{row['shell_type']}] "
+            cprint(f"    {row['id']}  {row['target']}  [{row['shell_type']}] "
                   f"{row['state']} scope={row['scope_decision']}{parent}")
-        print()
+        cprint()
 
     await _run_post_ai_suggestions(report)
 
     report_path = f"post_exploit_{session.id}.json"
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2, default=str)
-    print(f"[+] Report saved to {report_path}")
+    cprint(f"[+] Report saved to {report_path}")
 
     orchestrator.session_mgr.save()
 
@@ -2498,10 +2565,10 @@ async def _run_post_ai_suggestions(report: Dict[str, Any]) -> None:
     )
     if not steps:
         return
-    print("\n  [*] AI-assisted next steps "
+    cprint("\n  [*] AI-assisted next steps "
           f"({engine.provider.value}:{engine.model}):")
     for s in steps:
-        print(f"      [AI] {s.content[:160]}")
+        cprint(f"      [AI] {s.content[:160]}")
 
 
 def _resolve_engagement(targets: List[str], args: argparse.Namespace,
@@ -2520,17 +2587,17 @@ def _resolve_engagement(targets: List[str], args: argparse.Namespace,
         try:
             engagement = load_engagement_file(args.scope_file)
         except (OSError, ValueError) as exc:
-            print(f"[!] Cannot load engagement scope file: {exc}")
+            cprint(f"[!] Cannot load engagement scope file: {exc}")
             return None
         return engagement
     if getattr(args, "engagement_id", None):
         engagement = EngagementStore().get(args.engagement_id)
         if engagement is None:
-            print(f"[!] Engagement '{args.engagement_id}' not found in "
+            cprint(f"[!] Engagement '{args.engagement_id}' not found in "
                   f"engagements.json; failing closed.")
             return None
         if not engagement.active:
-            print(f"[!] Engagement '{args.engagement_id}' is inactive; failing closed.")
+            cprint(f"[!] Engagement '{args.engagement_id}' is inactive; failing closed.")
             return None
         return engagement
     if targets:
@@ -2538,7 +2605,7 @@ def _resolve_engagement(targets: List[str], args: argparse.Namespace,
         if techniques:
             kwargs["techniques"] = techniques
         return ad_hoc_engagement(list(targets), **kwargs)
-    print("[!] No engagement or target list provided; post-exploitation will "
+    cprint("[!] No engagement or target list provided; post-exploitation will "
           "fail closed (no scope established).")
     return None
 
@@ -2564,7 +2631,7 @@ def _enforce_session_scope(orchestrator, session, engagement) -> bool:
         session.engagement_id = engagement.id
         session.scope_decision = check.decision.value
         return True
-    print(f"[!] Session target {session.target!r} is out of scope: "
+    cprint(f"[!] Session target {session.target!r} is out of scope: "
           f"{check.reason}. Terminating session.")
     import asyncio as _asyncio
     _asyncio.get_event_loop().run_until_complete(
@@ -2576,13 +2643,13 @@ async def _register_scoped_bind(orchestrator, target: str, args, engagement) -> 
     try:
         session = await orchestrator.register_bind_shell(target, args.post_port)
     except Exception as exc:
-        print(f"[!] Failed to connect to bind shell: {exc}")
+        cprint(f"[!] Failed to connect to bind shell: {exc}")
         return None
     if not session:
-        print("[!] Failed to connect to bind shell")
+        cprint("[!] Failed to connect to bind shell")
         return None
     if engagement is None:
-        print("[!] No engagement established; bind session denied (fail closed).")
+        cprint("[!] No engagement established; bind session denied (fail closed).")
         return None
     if not _enforce_session_scope(orchestrator, session, engagement):
         return None
@@ -2591,12 +2658,12 @@ async def _register_scoped_bind(orchestrator, target: str, args, engagement) -> 
 
 async def _register_scoped_web(orchestrator, url: str, args, engagement) -> Optional[object]:
     if engagement is None:
-        print("[!] No engagement established; web session denied (fail closed).")
+        cprint("[!] No engagement established; web session denied (fail closed).")
         return None
     params = {"cmd": args.post_web_param}
     session = await orchestrator.register_web_shell(url, params, method=args.post_web_method)
     if not session:
-        print("[!] Failed to register web shell")
+        cprint("[!] Failed to register web shell")
         return None
     if not _enforce_session_scope(orchestrator, session, engagement):
         return None
@@ -2612,7 +2679,7 @@ async def _register_manual_session(orchestrator, target: str, args, engagement) 
             execution_context="manual",
         )
     except ValueError as exc:
-        print(f"[!] Session denied: {exc}")
+        cprint(f"[!] Session denied: {exc}")
         return None
     return session
 
@@ -3103,7 +3170,7 @@ def run_web_server(safe_mode: bool = True, host: str = None, port: int = None,
                    debug: bool = False) -> Flask:
     """Create and run the Athena REST API server. Returns the Flask app."""
     if not HAS_FLASK:
-        print("[!] Flask is required for the API server. Run: pip install flask")
+        cprint("[!] Flask is required for the API server. Run: pip install flask")
         sys.exit(1)
     app = create_app(safe_mode=safe_mode)
     if host is None:
@@ -3120,9 +3187,9 @@ def run_web_server(safe_mode: bool = True, host: str = None, port: int = None,
         if os.path.exists(cert) and os.path.exists(key):
             ssl_context = (cert, key)
         else:
-            print(f"[!] HTTPS_ENABLED=true but {cert}/{key} not found - serving HTTP")
+            cprint(f"[!] HTTPS_ENABLED=true but {cert}/{key} not found - serving HTTP")
     scheme = 'https' if ssl_context else 'http'
-    print(f"[*] Athena REST API listening on {scheme}://{host}:{port}")
+    cprint(f"[*] Athena REST API listening on {scheme}://{host}:{port}")
     app.run(host=host, port=port, debug=debug, ssl_context=ssl_context)
     return app
 
@@ -3155,7 +3222,7 @@ async def run_pipeline_stages(targets: List[str], args: argparse.Namespace) -> N
     from modules.logging_config import audit_logger
 
     if not targets:
-        print("[!] Pipeline stages require a target "
+        cprint("[!] Pipeline stages require a target "
               "(-t TARGET or -f TARGET_FILE)")
         sys.exit(1)
 
@@ -3166,7 +3233,7 @@ async def run_pipeline_stages(targets: List[str], args: argparse.Namespace) -> N
         store = EngagementStore()
         engagement = store.get(args.engagement_id)
         if engagement is None:
-            print(f"[!] Unknown engagement id: {args.engagement_id}")
+            cprint(f"[!] Unknown engagement id: {args.engagement_id}")
             sys.exit(1)
     else:
         engagement = ad_hoc_engagement(targets)
@@ -3214,8 +3281,8 @@ async def run_pipeline_stages(targets: List[str], args: argparse.Namespace) -> N
 
     for index, stage_key in enumerate(stage_keys, start=1):
         if stage_key not in STAGE_BY_KEY:
-            print(f"[!] Unknown stage: {stage_key!r}")
-            print("    Valid stages: " + ", ".join(STAGE_BY_KEY))
+            cprint(f"[!] Unknown stage: {stage_key!r}")
+            cprint("    Valid stages: " + ", ".join(STAGE_BY_KEY))
             sys.exit(1)
         spec = STAGE_BY_KEY[stage_key]
         technique, runner = await runner_for(stage_key)
@@ -3228,7 +3295,7 @@ async def run_pipeline_stages(targets: List[str], args: argparse.Namespace) -> N
         )
 
         if args.preflight:
-            print(f"\n[{index}/{len(stage_keys)}] " + plan.explain())
+            cprint(f"\n[{index}/{len(stage_keys)}] " + plan.explain())
             confirmation = not plan.requires_confirmation
 
         in_scope = engagement.check_target(targets[0]).allowed
@@ -3244,10 +3311,10 @@ async def run_pipeline_stages(targets: List[str], args: argparse.Namespace) -> N
             state = result.state.value
             error = result.error
 
-        print(f"    -> stage {stage_key!r} ended with state {state}"
+        cprint(f"    -> stage {stage_key!r} ended with state {state}"
               + (f" ({error['code']})" if error else ""))
 
-    print("\n" + json.dumps(orchestrator.report(), indent=2, default=str))
+    cprint("\n" + json.dumps(orchestrator.report(), indent=2, default=str))
     if args.preflight:
         cleanup.cleanup()
 
@@ -3261,6 +3328,8 @@ async def run_pipeline_stages(targets: List[str], args: argparse.Namespace) -> N
 
 async def main():
     args = parse_args()
+    if getattr(args, 'no_color', False):
+        con.disable()
 
     if args.mode:
         args.mode = MODE_ALIASES.get(args.mode, args.mode)
@@ -3277,7 +3346,7 @@ async def main():
     if args.guide is not None:
         if args.export:
             path = generate_guide_json(args.export)
-            print(f'Guide exported to {path}')
+            cprint(f'Guide exported to {path}')
         else:
             show_guide(args.guide if args.guide else None)
         return
@@ -3289,14 +3358,14 @@ async def main():
     if args.list_plugins:
         loader = PluginLoader()
         plugins = loader.list_plugins()
-        print("Available Plugins:")
+        cprint("Available Plugins:")
         for p in plugins:
-            print(f"  - {p.get('name', 'Unknown')}: {p.get('description', '')}")
+            cprint(f"  - {p.get('name', 'Unknown')}: {p.get('description', '')}")
         return
 
     if args.list_stages:
         for s in stage_list():
-            print(f"  {s['key']:<28} {s['name']} "
+            cprint(f"  {s['key']:<28} {s['name']} "
                   f"(produces: {', '.join(s['produces']) or 'none'})")
         return
 
@@ -3325,10 +3394,10 @@ async def main():
     try:
         await run_scan_session(targets, args)
     except KeyboardInterrupt:
-        print("\n[!] Interrupted by user")
+        cprint("\n[!] Interrupted by user")
         sys.exit(1)
     except Exception as e:
-        print(f"\n[!] Fatal error: {e}")
+        cprint(f"\n[!] Fatal error: {e}")
         if args.verbose:
             import traceback
             traceback.print_exc()

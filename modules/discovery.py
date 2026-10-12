@@ -15,6 +15,7 @@ import struct
 from functools import partial
 from datetime import datetime
 from modules.hidden_asset_scanner import HiddenAssetScanner
+from modules.console import cprint
 
 
 #: Worker threads for the TCP connect scan.  The asyncio default
@@ -42,7 +43,7 @@ async def resolve_host(domain: str, attempts: int = DNS_LOOKUP_ATTEMPTS) -> str:
         except Exception as exc:
             last_error = exc
             if attempt < attempts:
-                print(f"    [!] DNS lookup failed for {domain} "
+                cprint(f"    [!] DNS lookup failed for {domain} "
                       f"(attempt {attempt}/{attempts}): {exc} - retrying")
                 await asyncio.sleep(1.5 * attempt)
     raise last_error if last_error is not None else OSError('resolution failed')
@@ -145,9 +146,9 @@ class DiscoveryModule:
         # Normalize target URL - add protocol if missing
         if not target.startswith(('http://', 'https://')):
             target = f'https://{target}'
-            print(f"[*] Auto-corrected target to: {target}")
+            cprint(f"[*] Auto-corrected target to: {target}")
 
-        print(f"[*] Starting discovery on {target}")
+        cprint(f"[*] Starting discovery on {target}")
         self.logger.info(f"Starting discovery on {target}")
 
         # Fetch baseline response for SPA detection (used by directory enumeration)
@@ -168,7 +169,7 @@ class DiscoveryModule:
         if unknown:
             self.logger.warning('Ignoring unknown discovery stages: %s',
                                 ', '.join(sorted(unknown)))
-        print(f"  [*] Discovery stages: {', '.join(wanted)}")
+        cprint(f"  [*] Discovery stages: {', '.join(wanted)}")
 
         stage_tasks: Dict[str, Any] = {}
         if 'crawl' in wanted:
@@ -206,13 +207,13 @@ class DiscoveryModule:
             try:
                 return await coro
             finally:
-                print(f"    [time] {name}: {time.monotonic() - t0:.1f}s")
+                cprint(f"    [time] {name}: {time.monotonic() - t0:.1f}s")
 
         stage_t0 = time.monotonic()
         gathered = await asyncio.gather(
             *(_timed_stage(n, stage_tasks[n]) for n in stage_names),
             return_exceptions=True)
-        print(f"    [time] all discovery stages: "
+        cprint(f"    [time] all discovery stages: "
               f"{time.monotonic() - stage_t0:.1f}s")
         results = dict(zip(stage_names, gathered))
         if hidden_asset_scanner is not None:
@@ -233,7 +234,7 @@ class DiscoveryModule:
                 listing_harvest = await self.harvest_directory_listings(target)
             except Exception as exc:
                 self.logger.debug('listing harvest failed: %s', exc)
-            print(f"    [time] listing_harvest: {time.monotonic() - _t0:.1f}s")
+            cprint(f"    [time] listing_harvest: {time.monotonic() - _t0:.1f}s")
 
         # Second pass: detect technologies on discovered subdomains.
         # Was capped at 5 silently while logging "14 subdomains" - misleading.
@@ -243,13 +244,13 @@ class DiscoveryModule:
             _cap = 14
             _sample = subdomains[:_cap]
             if len(subdomains) > _cap:
-                print(f"  [*] Second-pass analysis on {_cap}/{len(subdomains)} subdomains (capped for runtime)...")
+                cprint(f"  [*] Second-pass analysis on {_cap}/{len(subdomains)} subdomains (capped for runtime)...")
             else:
-                print(f"  [*] Second-pass analysis on {len(subdomains)} subdomains...")
+                cprint(f"  [*] Second-pass analysis on {len(subdomains)} subdomains...")
             sub_tasks = [self.detect_technologies(sub) for sub in _sample]
             _sub_results = await asyncio.gather(*sub_tasks, return_exceptions=True)
             _ok = sum(1 for r in _sub_results if not isinstance(r, Exception))
-            print(f"  [+] Second-pass complete: {_ok}/{len(_sample)} subdomain tech probes succeeded")
+            cprint(f"  [+] Second-pass complete: {_ok}/{len(_sample)} subdomain tech probes succeeded")
 
         await self._sanitize_technologies()
 
@@ -282,7 +283,7 @@ class DiscoveryModule:
                 self.technologies.discard(base)
                 self._tech_confidence.pop(base, None)
         if self.technologies:
-            print(f"  [+] Technologies ({len(self.technologies)}): {', '.join(sorted(self.technologies)[:10])}"
+            cprint(f"  [+] Technologies ({len(self.technologies)}): {', '.join(sorted(self.technologies)[:10])}"
                   f"{'...' if len(self.technologies) > 10 else ''}")
 
         # Build structured tech list with confidence
@@ -326,7 +327,7 @@ class DiscoveryModule:
                 return
             self.visited_urls.add(base_url)
             
-            print(f"  [*] Crawling: {base_url}")
+            cprint(f"  [*] Crawling: {base_url}")
             
             async with (await self._get_session()).get(base_url, ssl=False, timeout=aiohttp.ClientTimeout(total=8)) as response:
                 if response.status not in [200, 301, 302]:
@@ -335,18 +336,18 @@ class DiscoveryModule:
                     if response.status in (403, 406, 429):
                         if not getattr(self, '_waf_warned', False):
                             self._waf_warned = True
-                            print(f"    [!] HTTP {response.status} on crawl - WAF/bot-filter likely "
+                            cprint(f"    [!] HTTP {response.status} on crawl - WAF/bot-filter likely "
                                   f"(ModSecurity/cPanel). Forms may be hidden; directory-enum + admin-panel probes still apply.")
                             try:
                                 self._add_tech('WAF/ModSecurity (suspected)', confidence=1)
                             except Exception:
                                 pass
                     else:
-                        print(f"    [-] HTTP {response.status}, skipping")
+                        cprint(f"    [-] HTTP {response.status}, skipping")
                     return
                     
                 content = await response.text()
-                print(f"    [+] Got response ({len(content)} bytes)")
+                cprint(f"    [+] Got response ({len(content)} bytes)")
                 soup = BeautifulSoup(content, 'html.parser')
                 
                 # HTML developer comments extraction
@@ -465,12 +466,12 @@ class DiscoveryModule:
                         })
                 
                 if links_found > 0 or forms_found > 0 or scripts_found > 0 or stylesheets_found > 0:
-                    print(f"    [+] Found {links_found} links, {forms_found} forms, {scripts_found} script files parsed, {stylesheets_found} stylesheet files parsed")
+                    cprint(f"    [+] Found {links_found} links, {forms_found} forms, {scripts_found} script files parsed, {stylesheets_found} stylesheet files parsed")
         except asyncio.TimeoutError:
-            print(f"  [-] Timeout on {base_url}")
+            cprint(f"  [-] Timeout on {base_url}")
             self.logger.warning(f"Timeout crawling {base_url}")
         except Exception as e:
-            print(f"  [-] Error crawling {base_url}: {str(e)[:100]}")
+            cprint(f"  [-] Error crawling {base_url}: {str(e)[:100]}")
             self.logger.exception(f"Error crawling {base_url}: {e}")
 
     SECRET_PATTERNS = {
@@ -648,7 +649,7 @@ class DiscoveryModule:
     async def enumerate_subdomains(self, target: str) -> None:
         """Comprehensive subdomain enumeration with DNS and HTTP verification"""
         domain = urlparse(target).netloc.split(':')[0]  # Remove port if present
-        print(f"  [*] Enumerating subdomains for: {domain}")
+        cprint(f"  [*] Enumerating subdomains for: {domain}")
         
         # Expanded subdomain list with better coverage
         common_subdomains = [
@@ -694,7 +695,7 @@ class DiscoveryModule:
         # would never guess (vpn-02, portal-2024, legacy-clone, ...).
         ct_hosts = await self._crtsh_hosts(domain)
         if ct_hosts:
-            print(f"  [+] crt.sh certificate transparency: {len(ct_hosts)} name(s)")
+            cprint(f"  [+] crt.sh certificate transparency: {len(ct_hosts)} name(s)")
 
         candidates = {f"{sub}.{domain}" for sub in common_subdomains}
         candidates |= ct_hosts
@@ -708,14 +709,14 @@ class DiscoveryModule:
                     ip = await loop.run_in_executor(None, socket.gethostbyname, full_domain)
                     self.discovered_subdomains.add(f"http://{full_domain}")
                     self.discovered_subdomains.add(f"https://{full_domain}")
-                    print(f"    [+] Found subdomain: {full_domain} ({ip})")
+                    cprint(f"    [+] Found subdomain: {full_domain} ({ip})")
                 except Exception:
                     # Try HTTP resolution even if DNS fails
                     try:
                         async with (await self._get_session()).head(f"http://{full_domain}", ssl=False, timeout=aiohttp.ClientTimeout(total=5)) as response:
                             if response.status < 400:
                                 self.discovered_subdomains.add(f"http://{full_domain}")
-                                print(f"    [+] Found subdomain: {full_domain} (HTTP)")
+                                cprint(f"    [+] Found subdomain: {full_domain} (HTTP)")
                     except Exception:
                         self.logger.debug(f"HTTP head check failed for {full_domain}")
             except Exception as e:
@@ -724,7 +725,7 @@ class DiscoveryModule:
         # Concurrent subdomain checking
         tasks = [check_subdomain(host) for host in sorted(candidates)]
         await asyncio.gather(*tasks, return_exceptions=True)
-        print(f"  [+] Subdomain enumeration complete, found {len(self.discovered_subdomains)}")
+        cprint(f"  [+] Subdomain enumeration complete, found {len(self.discovered_subdomains)}")
 
     async def _crtsh_hosts(self, domain: str) -> Set[str]:
         """Certificate-Transparency names for ``domain`` from crt.sh.
@@ -767,7 +768,7 @@ class DiscoveryModule:
         from modules.framework_config import FrameworkConfig
         domain = urlparse(target).netloc.split(':')[0]
         open_ports: List[int] = []
-        print(f"  [*] Scanning ports on: {domain}")
+        cprint(f"  [*] Scanning ports on: {domain}")
 
         timeout = FrameworkConfig.PORT_SCAN_TIMEOUT
         retries = FrameworkConfig.PORT_SCAN_RETRIES
@@ -783,7 +784,7 @@ class DiscoveryModule:
         try:
             await resolve_host(domain)
         except Exception as e:
-            print(f"    [-] DNS resolution failed for {domain}: {e}")
+            cprint(f"    [-] DNS resolution failed for {domain}: {e}")
             return []
 
         # IMPORTANT PORTS ONLY: the old 300+ list included obscure
@@ -820,7 +821,7 @@ class DiscoveryModule:
         except Exception:
             _want_full = False
         common_ports = FULL_PORTS if _want_full else IMPORTANT_PORTS
-        print(f"  [*] Port scope: {'FULL (ATHENA_FULL_PORTS=1)' if _want_full else 'IMPORTANT-ONLY (40 ports)'} — use --ports all for full sweep")
+        cprint(f"  [*] Port scope: {'FULL (ATHENA_FULL_PORTS=1)' if _want_full else 'IMPORTANT-ONLY (40 ports)'} — use --ports all for full sweep")
 
         sem = asyncio.Semaphore(100)
         scanned = 0
@@ -839,7 +840,7 @@ class DiscoveryModule:
                         if port not in open_ports:
                             open_ports.append(port)
                             service = self._guess_port_service(port)
-                            print(f"    [+] Port {port} open ({service})")
+                            cprint(f"    [+] Port {port} open ({service})")
                             if port in (80, 443, 8080, 8443, 8000, 8888, 9090):
                                 await self._verify_web_port(domain, port)
                         return
@@ -850,7 +851,7 @@ class DiscoveryModule:
             finally:
                 scanned += 1
                 if scanned % 50 == 0:
-                    print(f"    [*] Port scan progress: {scanned}/{len(common_ports)}")
+                    cprint(f"    [*] Port scan progress: {scanned}/{len(common_ports)}")
 
         tasks = [scan_port(p) for p in common_ports]
         try:
@@ -864,7 +865,7 @@ class DiscoveryModule:
         # important-only scan is a firewall artefact — keep only banner-
         # verified ports so the report lists real services, not noise.
         if len(open_ports) > 15:
-            print(f"  [!] {len(open_ports)} opens looks like a catch-all firewall "
+            cprint(f"  [!] {len(open_ports)} opens looks like a catch-all firewall "
                   f"(shared hosting) — verifying banners, keeping real services only")
             verified: List[int] = []
             for p in list(open_ports):
@@ -886,7 +887,7 @@ class DiscoveryModule:
                         except Exception:
                             pass
                         # HTTP did not answer — drop (firewall ghost)
-                        print(f"    [-] Port {p} dropped (TCP open, no HTTP banner — firewall ghost)")
+                        cprint(f"    [-] Port {p} dropped (TCP open, no HTTP banner — firewall ghost)")
                         continue
                     else:
                         # Non-web: keep only if a banner/handshake arrives
@@ -913,15 +914,15 @@ class DiscoveryModule:
                                     _s2.close()
                                 except Exception:
                                     pass
-                            print(f"    [-] Port {p} dropped (TCP open, no service banner — firewall ghost)")
+                            cprint(f"    [-] Port {p} dropped (TCP open, no service banner — firewall ghost)")
                         except Exception:
-                            print(f"    [-] Port {p} dropped (unreachable on re-check)")
+                            cprint(f"    [-] Port {p} dropped (unreachable on re-check)")
                             continue
                 except Exception:
                     continue
-            print(f"  [+] Banner verification: {len(open_ports)} -> {len(verified)} real service(s)")
+            cprint(f"  [+] Banner verification: {len(open_ports)} -> {len(verified)} real service(s)")
             open_ports = sorted(verified)
-        print(f"  [+] Port scan complete: {len(open_ports)} port(s) open on {domain}")
+        cprint(f"  [+] Port scan complete: {len(open_ports)} port(s) open on {domain}")
         return open_ports
     
     @staticmethod
@@ -972,7 +973,7 @@ class DiscoveryModule:
                         self._add_tech(powered, confidence=2)
                     if via and 'cloudflare' in via.lower():
                         self._add_tech('Cloudflare', confidence=2)
-                    print(f"      -> HTTP {resp.status} on port {port} [{server or 'unknown'}]")
+                    cprint(f"      -> HTTP {resp.status} on port {port} [{server or 'unknown'}]")
         except Exception:
             pass
     
@@ -1062,7 +1063,7 @@ class DiscoveryModule:
 
     async def detect_technologies(self, target: str) -> None:
         """Advanced technology detection using headers, cookies, content, and well-known paths."""
-        print(f"  [*] Detecting technologies on: {target}")
+        cprint(f"  [*] Detecting technologies on: {target}")
         
         parsed_target = urlparse(target)
         base = f"{parsed_target.scheme}://{parsed_target.netloc}"
@@ -1077,7 +1078,7 @@ class DiscoveryModule:
         # Probe well-known paths for version info
         await self._probe_urls_for_tech(base)
         
-        print(f"  [+] Detected {len(self.technologies)} technologies")
+        cprint(f"  [+] Detected {len(self.technologies)} technologies")
     
     async def _fingerprint_response(self, url: str, response: aiohttp.ClientResponse) -> None:
         """Analyze a single HTTP response for technology fingerprints with version extraction."""
@@ -1415,7 +1416,7 @@ class DiscoveryModule:
         Uses massive wordlists, smart dedup, SPA-aware validation, and AI
         to analyze responses and discover hidden attack surface.
         """
-        print(f"  [*] Aggressive directory/file enumeration on: {target}")
+        cprint(f"  [*] Aggressive directory/file enumeration on: {target}")
         
         # Phase 1: Common admin panels and login portals
         admin_paths = [
@@ -1652,10 +1653,10 @@ class DiscoveryModule:
             except Exception:
                 return False
 
-        print(f"  [*] Testing {len(all_paths)} paths...")
+        cprint(f"  [*] Testing {len(all_paths)} paths...")
         if _wildcards:
             _wdesc = ', '.join(f"HTTP {s} ({l}b)" for (s, l, _) in _wildcards)
-            print(f"  [*] Wildcard baselines ({len(_wildcards)} probes): {_wdesc} - "
+            cprint(f"  [*] Wildcard baselines ({len(_wildcards)} probes): {_wdesc} - "
                   f"matching bodies will be filtered, not confirmed")
 
         async def check_path(path):
@@ -1722,7 +1723,7 @@ class DiscoveryModule:
                                 'evidence': body[:300].replace('\n', ' ')[:300],
                             })
                             confirmed_dirs.append(path)
-                            print(f"    [+] Directory listing: {path}")
+                            cprint(f"    [+] Directory listing: {path}")
                             return
                         elif dl_score >= 2:
                             # Weak match - likely normal page mentioning parent dir
@@ -1738,7 +1739,7 @@ class DiscoveryModule:
                                 'type': 'phpinfo', 'description': 'Exposed phpinfo()'
                             })
                             confirmed_dirs.append(path)
-                            print(f"    [+] phpinfo: {path}")
+                            cprint(f"    [+] phpinfo: {path}")
                             return
                         
                         # Git exposed
@@ -1748,7 +1749,7 @@ class DiscoveryModule:
                                 'type': 'git_exposed', 'description': 'Git repository exposed'
                             })
                             confirmed_dirs.append(path)
-                            print(f"    [+] Git exposed: {path}")
+                            cprint(f"    [+] Git exposed: {path}")
                             return
                         
                         # .env exposed: STRICT - path must look like env/config
@@ -1781,7 +1782,7 @@ class DiscoveryModule:
                                         'evidence': body[:200].replace('\n', ' ')[:200],
                                     })
                                     confirmed_dirs.append(path)
-                                    print(f"    [+] Environment file: {path}")
+                                    cprint(f"    [+] Environment file: {path}")
                                     return
                         # App routes like /dashboard /signin /register returning
                         # 200 HTML are NOT env files - fall through to generic.
@@ -1798,7 +1799,7 @@ class DiscoveryModule:
                                     'type': 'config_exposed', 'description': 'Configuration file exposed'
                                 })
                                 confirmed_dirs.append(path)
-                                print(f"    [+] Config file: {path}")
+                                cprint(f"    [+] Config file: {path}")
                                 return
                         
                         # Backup file
@@ -1808,7 +1809,7 @@ class DiscoveryModule:
                                 'type': 'backup_file', 'description': 'Backup file accessible'
                             })
                             confirmed_dirs.append(path)
-                            print(f"    [+] Backup file: {path}")
+                            cprint(f"    [+] Backup file: {path}")
                             return
                         
                         # API documentation
@@ -1818,7 +1819,7 @@ class DiscoveryModule:
                                 'type': 'api_docs', 'description': 'API documentation exposed'
                             })
                             confirmed_dirs.append(path)
-                            print(f"    [+] API docs: {path}")
+                            cprint(f"    [+] API docs: {path}")
                             return
                         
                         # Default content detection
@@ -1858,7 +1859,7 @@ class DiscoveryModule:
             await asyncio.gather(*tasks, return_exceptions=True)
             # Progress update
             progress = min(i + batch_size, len(all_paths))
-            print(f"    [*] Progress: {progress}/{len(all_paths)} paths tested")
+            cprint(f"    [*] Progress: {progress}/{len(all_paths)} paths tested")
 
         # Post-scan uniform-block clustering: if >60% of distinct 403s share
         # near-identical length, they are a WAF block page, not 149 real
@@ -1890,24 +1891,24 @@ class DiscoveryModule:
         self._last_interesting = list(interesting_findings)
 
         # Summary: honest counts, no 403-as-vuln inflation
-        print(f"\n  [+] Directory enumeration complete:")
-        print(f"      - {len(confirmed_dirs)} paths confirmed (HTTP 200, distinct)")
-        print(f"      - {len(interesting_findings)} interesting findings")
-        print(f"      - {len(spa_routes)} SPA catch-all routes filtered")
+        cprint(f"\n  [+] Directory enumeration complete:")
+        cprint(f"      - {len(confirmed_dirs)} paths confirmed (HTTP 200, distinct)")
+        cprint(f"      - {len(interesting_findings)} interesting findings")
+        cprint(f"      - {len(spa_routes)} SPA catch-all routes filtered")
         try:
             _wsum = ', '.join(f"HTTP {s} ({l}b)" for (s, l, _) in _wildcards) if _wildcards else f"HTTP {wildcard_status}"
         except Exception:
             _wsum = f"HTTP {wildcard_status}"
-        print(f"      - {len(filtered_wildcard)} wildcard filtered [{_wsum}] (not real endpoints)")
-        print(f"      - {len(protected_distinct)} distinct protected endpoints (401/403, report-only, NOT vuln-scanned)")
+        cprint(f"      - {len(filtered_wildcard)} wildcard filtered [{_wsum}] (not real endpoints)")
+        cprint(f"      - {len(protected_distinct)} distinct protected endpoints (401/403, report-only, NOT vuln-scanned)")
         if len(protected_distinct) >= 50:
-            print(f"      [!] {len(protected_distinct)} uniform 403s suggests WAF default-deny (ModSecurity/cPanel) - "
+            cprint(f"      [!] {len(protected_distinct)} uniform 403s suggests WAF default-deny (ModSecurity/cPanel) - "
                   f"all treated as filtered, none fed to scanner")
 
         if interesting_findings:
-            print(f"\n  [*] Interesting findings:")
+            cprint(f"\n  [*] Interesting findings:")
             for finding in interesting_findings[:20]:
-                print(f"      [{finding['type'].upper()}] {finding['url']} - {finding['description']}")
+                cprint(f"      [{finding['type'].upper()}] {finding['url']} - {finding['description']}")
             # Only infer SPA hosting when we actually filtered catch-alls,
             # not merely because interesting findings exist.
             if len(spa_routes) >= 5:
@@ -1921,7 +1922,7 @@ class DiscoveryModule:
                         if 'firebase' in fb_body.lower() or 'projectId' in fb_body:
                             self._add_tech('Firebase Hosting', confidence=5)
                             self._add_tech('Google Cloud Platform', confidence=3)
-                            print(f"      => Confirmed Firebase Hosting via /__/firebase/init.json")
+                            cprint(f"      => Confirmed Firebase Hosting via /__/firebase/init.json")
             except Exception:
                 pass
         # Dedicated phpinfo probing pass - check endpoints not covered by directory enum
@@ -1948,20 +1949,20 @@ class DiscoveryModule:
                             if sum(1 for ind in phpinfo_indicators if ind in body) >= 3:
                                 self.discovered_urls.add(full_url)
                                 if not phpinfo_found:
-                                    print(f"  [+] phpinfo endpoints detected:")
+                                    cprint(f"  [+] phpinfo endpoints detected:")
                                     phpinfo_found = True
-                                print(f"      - {path}")
+                                cprint(f"      - {path}")
             except Exception:
                 pass
 
         if confirmed_dirs:
-            print(f"  [+] Real directories found: {len(confirmed_dirs)}")
+            cprint(f"  [+] Real directories found: {len(confirmed_dirs)}")
         else:
-            print(f"  [+] No distinct directories found — all routes return SPA catch-all")
+            cprint(f"  [+] No distinct directories found — all routes return SPA catch-all")
         # error_routes was never defined (NameError risk); report via stats instead.
         _stats = getattr(self, '_last_dir_stats', {})
         if _stats.get('wildcard_filtered'):
-            print(f"  [*] WAF-like behavior suspected: { _stats['wildcard_filtered']} paths "
+            cprint(f"  [*] WAF-like behavior suspected: { _stats['wildcard_filtered']} paths "
                   f"returned wildcard HTTP {wildcard_status} (likely ModSecurity/cPanel default deny)")
 
     #: Backup suffixes probed against files listed in an open directory listing.
@@ -2029,7 +2030,7 @@ class DiscoveryModule:
                     and f.get('type') == 'directory_listing'][:max_listings]
         if not listings:
             return out
-        print(f"  [*] Harvesting {len(listings)} open directory listing(s): "
+        cprint(f"  [*] Harvesting {len(listings)} open directory listing(s): "
               f"file list -> direct fetch + backup-copy probes")
         deadline = time.monotonic() + 45.0
         sem = asyncio.Semaphore(6)
@@ -2097,7 +2098,7 @@ class DiscoveryModule:
             unique.append(c)
         if not unique:
             if out['listings']:
-                print(f"    [*] {out['files_seen']} file(s) listed, "
+                cprint(f"    [*] {out['files_seen']} file(s) listed, "
                       f"no probeable backup/sensitive candidates")
             return out
 
@@ -2124,14 +2125,14 @@ class DiscoveryModule:
                 'verified': True,
                 'source': 'listing_harvest',
             }
-            print(f"    [+] {'Backup' if kind == 'backup' else 'File'}: "
+            cprint(f"    [+] {'Backup' if kind == 'backup' else 'File'}: "
                   f"{path} - {proof}")
             return finding
 
         probed = await asyncio.gather(*(_probe(c) for c in unique))
         out['findings'] = [f for f in probed if f]
         if out['listings']:
-            print(f"  [+] Listing harvest: {len(out['findings'])} confirmed "
+            cprint(f"  [+] Listing harvest: {len(out['findings'])} confirmed "
                   f"file(s) from {out['files_seen']} listed file(s) "
                   f"across {len(out['listings'])} listing(s)")
         return out
@@ -2389,7 +2390,7 @@ class DiscoveryModule:
                 if isinstance(_r, tuple):
                     _ep, _entry = _r
                     discovered.append(_entry)
-                    print(f"    [+] Security endpoint: {_ep} ({_entry.get('content_length', 0)} bytes)")
+                    cprint(f"    [+] Security endpoint: {_ep} ({_entry.get('content_length', 0)} bytes)")
         except Exception:
             pass
 
@@ -2458,7 +2459,7 @@ class DiscoveryModule:
         # Also try common subdomains for admin panels
         admin_subdomains = ['cpanel', 'webmail', 'mail', 'admin', 'panel', 'whm']
         
-        print(f"  [*] Probing for admin panels on {base_domain}...")
+        cprint(f"  [*] Probing for admin panels on {base_domain}...")
 
         # Batched probes (was sequential 80+ x 5s timeouts -> 86s).
         # Concurrency 20 keeps WAF-quiet while cutting wall time ~4x.
@@ -2514,7 +2515,7 @@ class DiscoveryModule:
             for _r in _path_results:
                 if isinstance(_r, dict):
                     discovered.append(_r)
-                    print(f"    [+] Admin panel: {_r.get('path')} [{_r.get('panel_type')}] (HTTP {_r.get('status')})")
+                    cprint(f"    [+] Admin panel: {_r.get('path')} [{_r.get('panel_type')}] (HTTP {_r.get('status')})")
             _sub_results = await asyncio.gather(*(_probe_sub(s) for s in admin_subdomains), return_exceptions=True)
             for _r in _sub_results:
                 if isinstance(_r, dict):
@@ -2523,7 +2524,7 @@ class DiscoveryModule:
                         _nm = _r.get('url', '').split('://', 1)[1] if '://' in _r.get('url', '') else _r.get('url', '')
                     except Exception:
                         _nm = _r.get('url', '')
-                    print(f"    [+] Admin subdomain: {_nm} (HTTP {_r.get('status')})")
+                    cprint(f"    [+] Admin subdomain: {_nm} (HTTP {_r.get('status')})")
         except Exception:
             pass
 
@@ -2569,12 +2570,12 @@ class DiscoveryModule:
                                     'source': panel['panel_type'],
                                     'priority': 'high'
                                 })
-                                print(f'    [+] Login form found on {panel["panel_type"]}: {form_url}')
+                                cprint(f'    [+] Login form found on {panel["panel_type"]}: {form_url}')
             except Exception:
                 pass
 
         if discovered:
-            print(f"  [+] Discovered {len(discovered)} admin panels ({len(high_value)} high-value targets)")
+            cprint(f"  [+] Discovered {len(discovered)} admin panels ({len(high_value)} high-value targets)")
         
         return high_value + medium_value
 
@@ -2619,7 +2620,7 @@ class DiscoveryModule:
             except Exception:
                 continue
         if emails_found:
-            print(f"  [+] Harvested {len(emails_found)} email addresses")
+            cprint(f"  [+] Harvested {len(emails_found)} email addresses")
         return emails_found
 
     async def scan_ports_advanced(self, target: str,
@@ -2643,14 +2644,14 @@ class DiscoveryModule:
                 ports = self._TOP_PORTS_1000
         if scan_types is None:
             scan_types = ['tcp_connect']
-        print(f"  [*] Advanced scanning {domain} with {len(scan_types)} scan types on {len(ports)} ports")
-        print(f"      Scan types: {', '.join(scan_types)}, concurrency: {concurrent}")
+        cprint(f"  [*] Advanced scanning {domain} with {len(scan_types)} scan types on {len(ports)} ports")
+        cprint(f"      Scan types: {', '.join(scan_types)}, concurrency: {concurrent}")
         results: Dict[str, Any] = {'host': domain, 'scan_types': scan_types, 'ports': {}}
         loop = asyncio.get_event_loop()
         try:
             await resolve_host(domain)
         except Exception as e:
-            print(f"    [-] DNS resolution failed for {domain}: {e}")
+            cprint(f"    [-] DNS resolution failed for {domain}: {e}")
             return results
         for scan_type in scan_types:
             if scan_type == 'tcp_connect':
@@ -2674,7 +2675,7 @@ class DiscoveryModule:
                     results['ports'][p] = {}
                 results['ports'][p][scan_type] = info
         open_count = sum(1 for p in results['ports'].values() if any(v.get('open') for v in p.values()))
-        print(f"  [+] Advanced scan complete: {open_count} open ports out of {len(ports)} scanned")
+        cprint(f"  [+] Advanced scan complete: {open_count} open ports out of {len(ports)} scanned")
         return results
 
     _TOP_PORTS_100 = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 389, 443, 445, 993, 995, 1433, 1521, 2049, 3306, 3389, 5060, 5432, 5900, 5985, 5986, 6379, 8080, 8443, 9000, 9090, 27017, 20, 26, 37, 79, 81, 88, 106, 113, 119, 123, 161, 162, 179, 199, 264, 311, 444, 464, 465, 500, 512, 513, 514, 515, 520, 521, 540, 546, 547, 554, 563, 585, 587, 591, 593, 623, 631, 636, 639, 646, 657, 691, 749, 750, 751, 752, 753, 754, 760, 764, 765, 767, 783, 800, 808, 843, 860, 861, 873, 902, 903, 953, 981, 987, 989, 990]
@@ -2723,7 +2724,7 @@ class DiscoveryModule:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
             sock.settimeout(3)
         except (OSError, PermissionError, AttributeError):
-            print("    [-] SYN scan requires root/admin privileges, falling back to TCP connect")
+            cprint("    [-] SYN scan requires root/admin privileges, falling back to TCP connect")
             return await self._scan_tcp_connect(domain, ports, concurrent, rate_limit, jitter)
 
         sem = asyncio.Semaphore(concurrent)

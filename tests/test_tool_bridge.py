@@ -481,3 +481,64 @@ def test_no_disagreement_flagged_when_nuclei_found_something():
     athena._flag_tool_disagreement(summary, [{'severity': 'CRITICAL'}])
 
     assert 'corroboration' not in summary
+
+# -- dalfox exit-2 (blocked / unreachable host) -------------------------------
+
+_EMPTY_ENVELOPE = json.dumps({
+    'findings': [],
+    'meta': {'dalfox_version': '3.2.4', 'findings_count': 0},
+})
+
+
+def test_dalfox_exit2_with_empty_envelope_is_executed_unreachable(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': _EMPTY_ENVELOPE, 'stderr': '',
+                'returncode': 2, 'duration_s': 20.0}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/dalfox')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_dalfox('https://blocked.example/'))
+    assert out['status'] == 'executed'
+    assert out['matched'] == 0
+    assert out['findings'] == []
+    assert 'not a clean XSS miss' in out['reason']
+
+
+def test_dalfox_exit2_without_envelope_stays_failed(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': '', 'stderr': '',
+                'returncode': 2, 'duration_s': 0.5}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/dalfox')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_dalfox('https://blocked.example/'))
+    assert out['status'] == 'failed'
+    assert 'exit code 2' in out['reason']
+
+
+def test_dalfox_notice_unreachable_is_info_not_alarm():
+    line = tb.dalfox_notice({'tool': 'dalfox', 'status': 'executed',
+                             'matched': 0,
+                             'reason': 'no scannable response (blocked, timeout, or refused) - not a clean XSS miss',
+                             'target': 'https://blocked.example/',
+                             'duration_s': 20.0})
+    assert line.startswith('  [*]')
+    assert 'not a clean XSS miss' in line
+
+
+def test_quick_reachable_true_on_200():
+    import athena
+    from aioresponses import aioresponses
+    with aioresponses() as mock_http:
+        mock_http.get('https://up.example/', status=200, body='ok')
+        assert asyncio_run(athena._quick_reachable('https://up.example/')) is True
+
+
+def test_quick_reachable_false_on_connection_error():
+    import athena
+    from aioresponses import aioresponses
+    with aioresponses():
+        # Unregistered host -> aioresponses raises -> unreachable.
+        assert asyncio_run(athena._quick_reachable('https://down.example/')) is False

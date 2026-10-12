@@ -277,6 +277,11 @@ def test_cli_skip_flags_default_off(monkeypatch):
 
 def test_extended_tools_degrade_cleanly_when_nothing_installed(monkeypatch, capsys):
     import athena
+
+    async def _reachable(url, timeout=10.0):
+        return True
+
+    monkeypatch.setattr(athena, '_quick_reachable', _reachable)
     monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): None)
     args = argparse.Namespace(no_sqlmap=False, no_dalfox=False, no_wafw00f=False, no_httpx=False)
     out = asyncio_run(athena.run_extended_tools('https://t.example/', args, ['https://t.example/']))
@@ -288,6 +293,11 @@ def test_extended_tools_degrade_cleanly_when_nothing_installed(monkeypatch, caps
 
 def test_extended_tools_respect_skip_flags(monkeypatch):
     import athena
+
+    async def _reachable(url, timeout=10.0):
+        return True
+
+    monkeypatch.setattr(athena, '_quick_reachable', _reachable)
     called = []
 
     async def _fake_run(target, binary=None, timeout=1.0, extra_args=(), enabled=True):
@@ -381,3 +391,20 @@ def test_kev_offline_returns_empty_catalog(monkeypatch, tmp_path):
     catalog = kev.load_kev_catalog(cache_path=str(tmp_path / 'kev.json'), refresh=True)
     assert catalog == {}
     assert kev.annotate_cve_results([], {}) == {'kev_count': 0, 'kev_ids': [], 'catalog_size': 0}
+
+def test_extended_tools_skip_fanout_when_target_unreachable(monkeypatch, capsys):
+    import athena
+
+    async def _unreachable(url, timeout=10.0):
+        return False
+
+    monkeypatch.setattr(athena, "_quick_reachable", _unreachable)
+    monkeypatch.setattr(tb, "find_binary", lambda name, extra_dirs=(): "/opt/x")
+    args = argparse.Namespace(no_sqlmap=False, no_dalfox=False,
+                              no_wafw00f=True, no_httpx=True)
+    out = asyncio_run(athena.run_extended_tools(
+        "https://down.example/", args, ["https://down.example/"]))
+    by_tool = {s["tool"]: s["status"] for s in out}
+    assert by_tool.get("sqlmap") == "skipped"
+    assert by_tool.get("dalfox") == "skipped"
+    assert "fan-out skipped" in capsys.readouterr().out

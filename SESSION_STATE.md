@@ -514,3 +514,151 @@ python -m pytest tests/test_external_tools.py tests/test_tool_bridge.py -q
 1. `python athena.py -t nacosogitech.com.ng` — expect wildcard filtered >0, Possible DirListing ~0, LDAP/redirect inconclusive unless differential, faster discovery/nuclei on balanced.
 2. Then: `git add athena.py modules/discovery.py modules/vulnerability_scanner.py modules/exploitation.py modules/ai_integration.py modules/tool_bridge.py` + commit (leave `.env`, `fullscan.txt`, reports untracked).
 3. Open risks: uniform-403 clustering heuristic, dir-listing host cap, LDAP/redirect need live negative test, AI 429 backoff still best-effort, perf still host-latency bound.
+
+---
+
+# Athena Session - 2026-10-12 (scan running, push on hold)
+
+## Status: PUSHED `e68e7c4` — color wave UNCOMMITTED, full scan in progress
+
+Operator is running a full scan now against the working tree described
+below (pushed commit `e68e7c4` + uncommitted color changes). Do NOT push
+until the operator says so.
+
+## Pushed in `e68e7c4` (master -> Micatob/Athena)
+- **WAF gate fix:** `modules/waf_detector.py` bad regex `blazingfast|??`
+  (`nothing to repeat at position 12`) fixed; `re.search` hardened;
+  `detect_waf()` split into `_detect_inner()` and never raises
+  (`verdict: unknown` fallback, outer session close kept).
+- **FTP anonymous:** `FTPBruteforcer.check_anonymous()` now tries
+  `anonymous / blank / guest / anonymous@test.com / ftp@test.com`;
+  `check_anonymous_access()` reports `USER ok, PASS rejected` detail;
+  POST-PASS success requires 2xx only (3xx = ACCT needed, not login).
+- **CVE mapping actually queries live NVD now** (`modules/cve_mapper.py`):
+  tech lists carry versions inline (`PHP 8.0.30`, no `version` key) so
+  every lookup was silently skipped — `split_name_version()` fixes that.
+  CPE `virtualMatchString` first (exact, then patch-stripped), keyword
+  fallback only when CPE finds nothing; 6.2s rate gate (0.6s with
+  `NVD_API_KEY`); 20s timeout + 1 retry. `_already_fixed()` drops CVEs
+  whose description says `before/fixed in <target version>` (patched
+  targets get no false CVE rows). Verified live: PHP 8.0.30 ->
+  CVE-2024-3566 (9.8) + CVE-2024-5458; Exim 4.100.1 -> 0 (correct).
+- **Service banners feed CVE mapping:** new `_service_banner_techs()` in
+  `athena.py` parses Exim/Dovecot/OpenSSH/Postfix/Apache/nginx versions
+  from enumeration banners (crawler never sees mail banners).
+- **Slow anti-lockout spray** (`modules/bruteforce.py::slow_spray`):
+  sequential, 4-9s gaps, 30 attempts, lockout abort (429/423/markers),
+  every heuristic hit re-verified via follow-up session check. Phase 3a
+  in `run_bruteforce` uses it for admin panels; lockouts surface in
+  console + HTML auth section (`reporting._summarize_bruteforce` carries
+  `spray_lockouts`).
+- **Directory-listing harvest** (`discovery.py::harvest_directory_listings`):
+  fetches open listings (max 3 x 40 files, 45s budget), direct-fetches
+  sensitive exts, probes `.bak/.old/~/ .swp/.save/.orig` on code files;
+  proof = HTTP 200 + content sniff (PK/gzip magic, `<?php`, SQL markers,
+  KEY=VALUE), HTML soft-404s rejected, homepage-size catch-all rejected.
+  Findings persisted via new `self._last_interesting` (previously
+  printed-only) and returned as `interesting_findings` +
+  `listing_harvest`; proven files appended to `vulnerabilities` as
+  verified `Exposed Sensitive File` (HIGH, `evidence: {proof}`).
+- **Backup soft-404 guard** (`hidden_asset_scanner.scan_backup_files`):
+  HTML 200s without archive/code markers skipped; homepage-size bodies
+  skipped (`_baseline_length` now stored on the scanner).
+- **HTML report:** new `DNS & Email Security` section (DMARC missing =
+  red) and `Confirmed Exposed Files` section (harvest + direct-probed
+  backups with proof); auth section shows spray lockouts; CVE section
+  wording updated (live NVD, not "offline-curated").
+- **Test fix:** `TestOpenRedirect::test_detects_open_redirect` failed
+  because the strict baseline check needs a benign mock — registered the
+  `athena-benign-home` 200 mock first.
+- **Engines installed:** dalfox v3.2.4 (`%LOCALAPPDATA%\Programs\athena-tools`,
+  SHA256-verified, added to user PATH) + wafw00f v2.4.2 (pip). Both
+  detected by `tool_bridge.tool_status`. New terminal needed for PATH.
+
+## Verification (2026-10-12)
+- Full suite: **870 passed, 1 skipped** (after open-redirect fix).
+- HTML smoke: DNS/DMARC, harvest, backup, LOCKOUT sections render.
+
+## UNCOMMITTED (do not push yet — operator decision pending)
+- **Console colors** — NEW `modules/console.py` (colorama; auto-off when
+  piped/pytest/`--no-color`/`NO_COLOR`; marker/keyword/CVE painting;
+  `cprint()` drop-in; `phase()` cyan banners; `ok/good/warn/bad/info/dim`).
+  `print(` -> `cprint(` across `athena.py`, `discovery.py`,
+  `bruteforce.py`, `hidden_asset_scanner.py`,
+  `vulnerability_scanner.py`; phase banners use `con.phase()`; new
+  `--no-color` Display flag wired in `main()`; post-payload prints kept
+  raw (copy-paste safety). NEW `tests/test_console.py` (7 tests).
+  Regression: 338 passed, 1 skipped on console/scanner/discovery/
+  reporting/honesty/config/tools/bridge/hidden-asset/bruteforce/FP suites.
+- `fullscan.txt` stays untracked (console log).
+
+## Running now
+- Full scan in progress on the operator's machine using this exact tree
+  (commit `e68e7c4` + uncommitted color wave).
+- Next: operator reviews scan output, then says when to push colors.
+
+## 2026-10-12 post-scan crash fix (UNCOMMITTED)
+- Scan reached service enumeration, then died with
+  `[!] Fatal error: name 're' is not defined` — `_service_banner_techs()`
+  (new this wave) uses `re.search` but `athena.py` never imported `re`.
+  Fixed with `import re`.
+- Same run showed `Dalfox unavailable` despite install: operator's shell
+  had stale PATH. Hardened `tool_bridge._EXTRA_SEARCH_DIRS` with
+  `%LOCALAPPDATA%\Programs\athena-tools` so dalfox is found even without
+  PATH propagation. Verified: `find_binary('dalfox')` resolves with the
+  tools dir stripped from PATH; `_service_banner_techs()` returns Exim
+  4.100.1 and skips versionless Dovecot.
+- Scan evidence before the crash: WAF gate LIKELY (2/2) + wafw00f hit;
+  34 native [6 CRITICAL, 10 HIGH, 18 MEDIUM]; 0 backups (guard working);
+  harvest 0.9s, no confirmed files; FTP anon detail correct; WAF-blind
+  safe-mode message correct. No report was produced (crash hit before
+  CVE/AI/report) — operator must re-run after this fix.
+- Tests: tool_bridge + console + external-tools = 81 passed.
+
+## 2026-10-12 dalfox exit-2 + IP-block handling (UNCOMMITTED)
+- Operator's rescan: every dalfox run failed `exit code 2`, then the site
+  stopped loading in the browser (likely server-side block after two full
+  scans + fan-outs in ~3h; port-scan volume trips CSF-style firewalls).
+- Root cause of exit 2 found by local repro: dalfox v3.2.4 exits 2 with a
+  well-formed empty-findings envelope when the target is unreachable
+  (verified against 127.0.0.1:9). NOT a CLI/flag bug — `scan --format
+  json --silence --no-color` is valid and exits 0 on live hosts.
+- `tool_bridge.run_dalfox`: exit-2 + empty envelope -> `executed`,
+  matched 0, reason `no scannable response ... not a clean XSS miss`
+  (was: 10x scary `[!] Dalfox failed: exit code 2`). `dalfox_notice`
+  prints `[*]` info for executed-with-reason (keeps `[+]` for true clean).
+- `athena.run_extended_tools`: new `_quick_reachable()` gate (one 10s GET;
+  403 counts as reachable) — unreachable target skips sqlmap/dalfox
+  fan-out with one `[*]` line instead of 10+ timeout burns; collapse now
+  merges all-matched-0 runs into one row (`urls_probed` count).
+- Tests: 5 new in `tests/test_tool_bridge.py` (exit-2 envelope/failed,
+  notice tone, reachable true/false via aioresponses) — file now 45 passed.
+- Operator advice given: stop scanning, wait for block to lift, verify in
+  browser, rescan; unblock via WHM/CSF if they control the server.
+
+## 2026-10-12 None-crash fix (UNCOMMITTED, VERIFIED)
+- Operator's rescan died after the exploitation loop with
+  `[!] Fatal error: 'NoneType' object has no attribute 'get'` (no report).
+- REPRODUCED locally: a `None` inside `vulnerabilities` crashes
+  `reporting._dedup_vulnerabilities` sort lambda — exact same AttributeError.
+- Hardened every aggregation boundary (drop non-dicts + debug log, never
+  raise): reporting `_dedup_vulnerabilities`, `_generate_vulnerability_
+  details`, `generate_recommendations`, `export_to_csv/xml`, comprehensive
+  `_sev`/grouping filter; scanner `_absorb`, `_deduplicate_results`,
+  `scan_all` extends + severity counts; runner `_summary`, `_attempt`
+  (malformed finding -> inconclusive record); athena attempts print loop.
+- Reachability gate in `run_auto_exploitation`: dead host -> `denied`
+  with `target unreachable - verification skipped` (one `[*]` line) instead
+  of 40s x N timeout burns. Same `_quick_reachable()` as extended tools.
+- Tests: NEW `tests/test_none_hardening.py` (8 tests incl. exact-crash
+  repro through `generate_report`, timeout attempts, unreachable skip,
+  None-attempt loop); fixed 3 existing tests that assumed no gate
+  (`test_exploitation_runner::test_run_auto_exploitation_returns_dict`,
+  `test_external_tools` degrade/skip-flags now mock `_quick_reachable`);
+  new fan-out-skip test in `test_external_tools.py`.
+- VERIFIED: full suite split in halves — 465 + 426 passed, 1 skipped
+  (891 total, was 870). Single 900s combined run timed out under machine
+  load; halves take ~200s combined.
+- Producer of the original None not isolated (all scanner appends are dict
+  literals; nuclei/dalfox/sqlmap parsers clean) — guards + drop-logs at
+  every boundary make the class of crash impossible regardless of source.

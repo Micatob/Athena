@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+from modules.console import cprint
 import logging
 import os
 import time
@@ -127,7 +128,7 @@ class HiddenAssetScanner:
         return self._session
 
     async def run(self, target: str, baseline_body: str = "", baseline_length: int = 0) -> Dict[str, Any]:
-        print(f"  [*] Hidden asset scanning on: {target} (concurrency={self.max_concurrency}, budget={self.budget_seconds:.0f}s)")
+        cprint(f"  [*] Hidden asset scanning on: {target} (concurrency={self.max_concurrency}, budget={self.budget_seconds:.0f}s)")
         self.discovered_hidden_directories = []
         self.discovered_backup_files = []
         self.discovered_misconfigurations = []

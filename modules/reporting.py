@@ -409,7 +409,15 @@ class ReportGenerator:
         deduped_vulns = self._dedup_vulnerabilities(all_vulns)
         filtered_vulns = deduped_vulns[:self.MAX_REPORT_FINDINGS]
 
-        # Categorize vulnerabilities (findings are mixed-case across modules)
+        # Categorize vulnerabilities (findings are mixed-case across modules).
+        # Non-dict entries (None from a failed check merge) are dropped here
+        # with a debug log - they must never crash report generation.
+        _dropped = sum(1 for v in filtered_vulns if not isinstance(v, dict))
+        if _dropped:
+            self.logger.debug('dropped %d non-dict finding(s) from report',
+                              _dropped)
+            filtered_vulns = [v for v in filtered_vulns if isinstance(v, dict)]
+
         def _sev(v: Dict[str, Any]) -> str:
             return str(v.get('severity') or '').upper()
         critical_vulns = [v for v in filtered_vulns if _sev(v) == 'CRITICAL']
@@ -797,7 +805,9 @@ class ReportGenerator:
                         'MEDIUM': 'Scheduled', 'LOW': 'Scheduled', 'INFO': 'Scheduled'}
 
         added_types = set()
-        for vuln in vulnerabilities:
+        for vuln in vulnerabilities or []:
+            if not isinstance(vuln, dict):
+                continue
             vtype = vuln.get('type', '')
             matched = False
             for key, (sev, rec) in issue_map.items():
@@ -1280,7 +1290,9 @@ class ReportGenerator:
                                        'and re-test to confirm remediation.'),
                     'timeline': _tl}
 
-        for vuln in vulnerabilities:
+        for vuln in vulnerabilities or []:
+            if not isinstance(vuln, dict):
+                continue
             vtype = vuln.get('type', 'General Finding')
             confirmed_url = vuln.get('url', '')
             payload = vuln.get('payload', '')
@@ -1509,10 +1521,18 @@ class ReportGenerator:
         seen = set()
         deduplicated = []
 
+        # A single None (failed merge upstream) used to kill the whole
+        # report with AttributeError - drop non-dicts, log, continue.
+        clean = [v for v in (vulnerabilities or []) if isinstance(v, dict)]
+        if len(clean) != len(vulnerabilities or []):
+            logging.getLogger(__name__).debug(
+                'dedup dropped %d non-dict finding(s)',
+                len(vulnerabilities or []) - len(clean))
+
         # Sort by severity (CRITICAL first)
         severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'INFO': 4}
         ordered = sorted(
-            vulnerabilities,
+            clean,
             key=lambda x: severity_order.get(x.get('severity', 'INFO'), 5),
         )
 
@@ -1538,7 +1558,7 @@ class ReportGenerator:
         """
         seen = set()
         unique = []
-        for res in results:
+        for res in results or []:
             if not isinstance(res, dict):
                 continue
             status = str(res.get('status') or '').strip().upper()
@@ -1554,7 +1574,9 @@ class ReportGenerator:
         with open(filename, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['Type', 'Severity', 'URL', 'Description'])
             writer.writeheader()
-            for v in vulns:
+            for v in vulns or []:
+                if not isinstance(v, dict):
+                    continue
                 writer.writerow({
                     'Type': v.get('type', ''),
                     'Severity': v.get('severity', ''),
@@ -1569,7 +1591,9 @@ class ReportGenerator:
         target.text = results.get('target', 'unknown')
         
         vulns_elem = ET.SubElement(root, "findings")
-        for v in results.get('vulnerabilities', []):
+        for v in results.get('vulnerabilities', []) or []:
+            if not isinstance(v, dict):
+                continue
             v_elem = ET.SubElement(vulns_elem, "finding")
             for key, val in v.items():
                 child = ET.SubElement(v_elem, key)

@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import logging
+from modules.console import cprint
 import os
 import random
 import time
@@ -101,7 +102,7 @@ class BruteforceModule:
                     continue
                 if item[2]:
                     elapsed = time.monotonic() - started
-                    print(f"    [+] SUCCESS: {item[0]}:{item[1]} on {form_url} "
+                    cprint(f"    [+] SUCCESS: {item[0]}:{item[1]} on {form_url} "
                           f"({index}/{total} attempts, {elapsed:.0f}s)")
                     self.logger.warning(
                         'Successful login found: %s:%s on %s',
@@ -109,11 +110,11 @@ class BruteforceModule:
                     return item[0], item[1]
 
             elapsed = time.monotonic() - started
-            print(f"    [*] {form_url}: {index}/{total} attempts "
+            cprint(f"    [*] {form_url}: {index}/{total} attempts "
                   f"({elapsed:.0f}s elapsed)")
 
         if index < total:
-            print(f"    [-] {form_url}: {self.FORM_DEADLINE_SECONDS:.0f}s budget "
+            cprint(f"    [-] {form_url}: {self.FORM_DEADLINE_SECONDS:.0f}s budget "
                   f"exhausted after {index}/{total} attempts, moving on")
             self.logger.info(
                 'Bruteforce deadline reached on %s after %d attempts',
@@ -149,7 +150,7 @@ class BruteforceModule:
             method = form['method']
             inputs = form['inputs']
 
-            print(f"  [*] Bruteforcing login form: {form_url}")
+            cprint(f"  [*] Bruteforcing login form: {form_url}")
             self.logger.info(f"Bruteforcing login form: {form_url}")
 
             # Identify username and password fields
@@ -169,11 +170,11 @@ class BruteforceModule:
                     other_fields[name] = 'default'  # or some default value
 
             if not username_field or not password_field:
-                print(f"    [-] Could not identify username/password fields for {form_url}")
+                cprint(f"    [-] Could not identify username/password fields for {form_url}")
                 continue
 
             if not await self._form_reachable(form_url):
-                print(f"    [-] {form_url} unreachable (connect timeout/refused), "
+                cprint(f"    [-] {form_url} unreachable (connect timeout/refused), "
                       f"skipping form")
                 self.logger.warning(f"Skipping unreachable login form: {form_url}")
                 continue
@@ -217,17 +218,17 @@ class BruteforceModule:
             method = form['method']
             inputs = form['inputs']
 
-            print(f"  [*] Intelligent bruteforce on: {form_url}")
+            cprint(f"  [*] Intelligent bruteforce on: {form_url}")
 
             # Identify fields
             username_field, password_field, other_fields = self._identify_fields(inputs)
 
             if not username_field or not password_field:
-                print(f"    [-] could not identify username/password fields, skipping")
+                cprint(f"    [-] could not identify username/password fields, skipping")
                 continue
 
             if not await self._form_reachable(form_url):
-                print(f"    [-] {form_url} unreachable (connect timeout/refused), "
+                cprint(f"    [-] {form_url} unreachable (connect timeout/refused), "
                       f"skipping form")
                 self.logger.warning(f"Skipping unreachable login form: {form_url}")
                 continue
@@ -383,16 +384,16 @@ class BruteforceModule:
             form_url = form['url']
             method = form.get('method', 'POST')
             inputs = form.get('inputs') or []
-            print(f"  [*] Slow spray on: {form_url} "
+            cprint(f"  [*] Slow spray on: {form_url} "
                   f"({len(combos)} attempts, {self.SPRAY_DELAY_MIN:.0f}-"
                   f"{self.SPRAY_DELAY_MAX:.0f}s gaps, lockout abort)")
 
             username_field, password_field, other_fields = self._identify_fields(inputs)
             if not username_field or not password_field:
-                print(f"    [-] could not identify username/password fields, skipping")
+                cprint(f"    [-] could not identify username/password fields, skipping")
                 continue
             if not await self._form_reachable(form_url):
-                print(f"    [-] {form_url} unreachable (connect timeout/refused), skipping")
+                cprint(f"    [-] {form_url} unreachable (connect timeout/refused), skipping")
                 continue
 
             out['stats']['forms'] += 1
@@ -408,7 +409,7 @@ class BruteforceModule:
                 if lockout:
                     detail = (f"lockout/rate-limit signal (HTTP {status}) "
                               f"after {i - 1} attempts")
-                    print(f"    [!] LOCKOUT on {form_url}: {detail} — aborting "
+                    cprint(f"    [!] LOCKOUT on {form_url}: {detail} — aborting "
                           f"this form; wait for the block to lift, then retry manually")
                     self.logger.warning('Spray lockout on %s: %s', form_url, detail)
                     out['lockouts'].append({'url': form_url, 'detail': detail})
@@ -416,17 +417,17 @@ class BruteforceModule:
 
                 if ok:
                     if await self._verify_session(form_url):
-                        print(f"    [+] SUCCESS (session verified): "
+                        cprint(f"    [+] SUCCESS (session verified): "
                               f"{username}:{password} on {form_url}")
                         out['credentials'].append({
                             'url': form_url, 'username': username,
                             'password': password, 'method': 'slow-spray',
                             'verified': True})
                         break
-                    print(f"    [*] heuristic success for {username}:{password} "
+                    cprint(f"    [*] heuristic success for {username}:{password} "
                           f"failed the session re-check — false positive, continuing")
 
-                print(f"    [*] spray {form_url}: {i}/{len(combos)} attempts")
+                cprint(f"    [*] spray {form_url}: {i}/{len(combos)} attempts")
 
         return out
 

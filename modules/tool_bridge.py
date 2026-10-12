@@ -67,6 +67,7 @@ DEFAULT_RATE_LIMIT = 150
 #: common Linux/Go install dirs).
 _EXTRA_SEARCH_DIRS = (
     os.path.expandvars(r'%LOCALAPPDATA%\Programs\athena\tools'),
+    os.path.expandvars(r'%LOCALAPPDATA%\Programs\athena-tools'),
     os.path.expandvars(r'%LOCALAPPDATA%\Programs\nuclei'),
     os.path.expandvars(r'%USERPROFILE%\go\bin'),
     os.path.expandvars(r'%PROGRAMFILES%\nuclei'),
@@ -854,6 +855,19 @@ async def run_dalfox(target: str,
     # success with evidence, not failure.
     stdout = str(result.get('stdout') or '')
     findings = parse_dalfox_json(stdout, target)
+    # Exit 2 with a well-formed empty-findings envelope means dalfox ran but
+    # got no scannable response (blocked / timeout / refused).  That is an
+    # executed attempt against an unresponsive host - never a clean "no XSS"
+    # and never a crash worth a scary [!] line.
+    if (not findings and result.get('returncode') == 2
+            and '"findings"' in stdout and 'dalfox_version' in stdout):
+        return {'tool': tool, 'status': 'executed', 'binary': binary,
+                'reason': ('no scannable response (blocked, timeout, or refused) - '
+                           'not a clean XSS miss'),
+                'findings': [], 'matched': 0,
+                'duration_s': result.get('duration_s', 0.0),
+                'argv': ['<binary>', *argv[1:]],
+                'returncode': 2, 'target': target}
     if findings:
         return {'tool': tool, 'status': 'executed', 'binary': binary, 'reason': '',
                 'findings': findings, 'matched': len(findings),
@@ -892,8 +906,14 @@ def dalfox_notice(summary: Optional[Dict[str, Any]]) -> str:
     status = str(summary.get('status', ''))
     if status == 'executed':
         matched = int(summary.get('matched', 0))
+        reason = str(summary.get('reason', '') or '')
+        probed = summary.get('urls_probed')
+        scope = (f"across {probed} URL(s)" if probed
+                 else f"at {summary.get('target', '')}")
+        if reason:
+            return f"  [*] Dalfox: 0 findings {scope} ({reason})"
         return (f"  [+] Dalfox: {matched} XSS finding(s) "
-                f"at {summary.get('target', '')} "
+                f"{scope} "
                 f"({summary.get('duration_s', 0.0):.0f}s)")
     if status == 'disabled':
         return '  [*] Dalfox disabled (--no-dalfox)'
