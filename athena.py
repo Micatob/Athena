@@ -1204,7 +1204,9 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
         report_data['enumeration'] = enumeration
     if cve_results:
         cve_dicts = []
-        for r in cve_results:
+        for r in (cve_results or []):
+            if r is None or not hasattr(r, 'technology'):
+                continue
             cve_dicts.append({
                 'technology': r.technology, 'version': r.version,
                 'confidence': r.confidence,
@@ -1213,7 +1215,7 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
                           'kev': bool(getattr(c, 'kev', False)),
                           'kev_due_date': getattr(c, 'kev_due_date', '') or '',
                           'kev_name': getattr(c, 'kev_name', '') or ''}
-                         for c in r.cves],
+                         for c in (r.cves or []) if c is not None],
                 'max_cvss': r.max_cvss,
             })
         report_data['cve_mapping'] = cve_dicts
@@ -1262,10 +1264,19 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
 
 
 def _generate_html_report(report: Dict[str, Any]) -> str:
-    audit = report.get('athena_security_audit', report)
-    summary = audit.get('audit_summary', {})
-    sev = summary.get('severity_breakdown', {})
-    vulns = audit.get('detailed_analysis', {})
+    report = report if isinstance(report, dict) else {}
+    audit = report.get('athena_security_audit') or report
+    if not isinstance(audit, dict):
+        audit = {}
+    summary = audit.get('audit_summary') or {}
+    if not isinstance(summary, dict):
+        summary = {}
+    sev = summary.get('severity_breakdown') or {}
+    if not isinstance(sev, dict):
+        sev = {}
+    vulns = audit.get('detailed_analysis') or {}
+    if not isinstance(vulns, dict):
+        vulns = {}
 
     critical_count = sev.get('critical', 0)
     high_count = sev.get('high', 0)
@@ -1277,18 +1288,20 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     vuln_rows = ''
     inconclusive_note_total = 0
     for vtype, vinfo in vulns.items():
+        if not isinstance(vinfo, dict):
+            continue
         s = vinfo.get('severity', 'UNKNOWN')
         color = {'CRITICAL': '#ff4444', 'HIGH': '#ff8800', 'MEDIUM': '#ffbb33', 'LOW': '#ffdd55'}.get(s, '#999')
-        assets = '<br>'.join(f"<code>{html.escape(str(a))}</code>" for a in vinfo.get('assets_affected', [])[:5])
-        techniques = ''.join(f"<li>{html.escape(str(t))}</li>" for t in vinfo.get('attack_techniques', []))
-        tools = html.escape(', '.join(vinfo.get('tools', [])))
+        assets = '<br>'.join(f"<code>{html.escape(str(a))}</code>" for a in (vinfo.get('assets_affected') or [])[:5])
+        techniques = ''.join(f"<li>{html.escape(str(t))}</li>" for t in (vinfo.get('attack_techniques') or []))
+        tools = html.escape(', '.join(vinfo.get('tools') or []))
         gains = html.escape(str(vinfo.get('attacker_gains', '')))
         desc_full = html.escape(str(vinfo.get('description', '')))
         remediation = html.escape(str(vinfo.get('remediation', '')))
         timeline = html.escape(str(vinfo.get('timeline', 'Scheduled')))
         vcount = int(vinfo.get('verified_count', 0) or 0)
 
-        confirmed_findings = vinfo.get('confirmed_findings', []) or []
+        confirmed_findings = [f for f in (vinfo.get('confirmed_findings') or []) if isinstance(f, dict)]
         # Split proven vs unverified vs inconclusive
         proven = [f for f in confirmed_findings if f.get('verified')]
         inconc = [f for f in confirmed_findings if str(f.get('verification_status', '')).lower() == 'inconclusive']
@@ -1346,14 +1359,23 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
         </tr>"""
 
     tech_items = ''
-    for t in audit.get('discovery_findings', {}).get('technologies_with_confidence', []):
+    _df = audit.get('discovery_findings') or {}
+    if not isinstance(_df, dict):
+        _df = {}
+    for t in (_df.get('technologies_with_confidence') or []):
+        if not isinstance(t, dict):
+            continue
         tech_items += f"<li>{t.get('technology')} (confidence: {t.get('confidence')})</li>"
     if not tech_items:
-        for t in audit.get('discovery_findings', {}).get('technologies', []):
+        for t in (_df.get('technologies') or []):
+            if t is None:
+                continue
             tech_items += f"<li>{t}</li>"
 
     rec_items = ''
-    for r in audit.get('remediation_recommendations', []):
+    for r in (audit.get('remediation_recommendations') or []):
+        if not isinstance(r, dict):
+            continue
         rec_items += f"""
         <div class="rec-item">
             <strong>{r.get('issue')}</strong> ({r.get('severity')})<br>
@@ -1362,13 +1384,17 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
         </div>"""
 
     no_findings = audit.get('no_vulnerabilities_found', False)
-    asset_summary = summary.get('assets_discovered', {})
+    asset_summary = summary.get('assets_discovered') or {}
+    if not isinstance(asset_summary, dict):
+        asset_summary = {}
     asset_text = (f"{asset_summary.get('open_ports', 0)} open ports, "
                   f"{asset_summary.get('urls', 0)} URLs, "
                   f"{asset_summary.get('subdomains', 0)} subdomains, "
                   f"{asset_summary.get('technologies', 0)} technologies")
 
-    discovery_findings = audit.get('discovery_findings', {})
+    discovery_findings = audit.get('discovery_findings') or {}
+    if not isinstance(discovery_findings, dict):
+        discovery_findings = {}
     # "not scanned" (recon phase never ran in this mode) is a different
     # claim from "scanned, nothing found" - never conflate the two.
     recon_ran = bool(discovery_findings.get('ran'))
@@ -1383,8 +1409,10 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     # Dedupe admin panels for display (defense in depth; source already dedupes)
     _admin_seen = set()
     _admin_unique = []
-    for p in discovery_findings.get('admin_panels', []) or []:
+    for p in (discovery_findings.get('admin_panels') or []):
         try:
+            if not isinstance(p, dict):
+                continue
             _k = str((p or {}).get('url', '')).rstrip('/').lower()
             if not _k or _k in _admin_seen:
                 continue
@@ -1396,14 +1424,18 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
         f"<li><strong>[{html.escape(str(p.get('panel_type', 'UNKNOWN')))}]</strong> "
         f"<code>{html.escape(str(p.get('url', '')))}</code> "
         f"(HTTP {html.escape(str(p.get('status', '')))})</li>"
-        for p in _admin_unique[:50]
+        for p in _admin_unique[:50] if isinstance(p, dict)
     )
     admin_section = (f"<h2>Admin Panels &amp; High-Value Targets</h2><ul>{admin_items}</ul>"
                      if admin_items else "")
 
     # --- DNS & email hygiene (SPF/DMARC proven from live DNS lookups) ---
     dns_data = discovery_findings.get('dns_records') or {}
+    if not isinstance(dns_data, dict):
+        dns_data = {}
     tls_data = discovery_findings.get('tls_certificate') or {}
+    if not isinstance(tls_data, dict):
+        tls_data = {}
     dns_section = ''
     if dns_data or tls_data:
         def _kv_row(label, value, danger=False):
@@ -1419,9 +1451,9 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
                        or ('SPF record present' if dns_data.get('spf_record')
                            else 'Not queried'))
             _ip = str(dns_data.get('ip')
-                      or (', '.join(dns_data.get('a_records', [])[:3]) or 'n/a'))
-            _mx = dns_data.get('mx_records', []) or []
-            _mx_text = (', '.join(str(m.get('exchange', m)) for m in _mx[:4])
+                      or (', '.join(str(a) for a in (dns_data.get('a_records') or [])[:3]) or 'n/a'))
+            _mx = [m for m in (dns_data.get('mx_records') or []) if m is not None]
+            _mx_text = (', '.join(str(m.get('exchange', m)) if isinstance(m, dict) else str(m) for m in _mx[:4])
                         if _mx else 'none (email receiving may be external)')
             _rows += _kv_row('Domain', html.escape(str(dns_data.get('domain', ''))))
             _rows += _kv_row('IP (A record)', html.escape(_ip))
@@ -1568,11 +1600,11 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     else:
         enum_section = ''
 
-    cve_rows_list = audit.get('cve_mapping', []) or []
+    cve_rows_list = [e for e in (audit.get('cve_mapping') or []) if isinstance(e, dict)]
     if cve_rows_list:
         rows = ''
         for entry in cve_rows_list:
-            cves = entry.get('cves', []) or []
+            cves = [c for c in (entry.get('cves') or []) if isinstance(c, dict)]
             cve_items = ''
             for c in cves[:5]:
                 kev_badge = ''
@@ -1585,11 +1617,11 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
                     f"(CVSS {html.escape(str(c.get('cvss_score', '')))}) - "
                     f"{html.escape(str(c.get('description', ''))[:160])}{kev_badge}</li>")
             rows += (f"<tr><td>{html.escape(str(entry.get('technology', '')))}</td>"
-                     f"<td>{html.escape(str(entry.get('version', '')) or 'unknown')}</td>"
+                     f"<td>{html.escape(str(entry.get('version', '') or 'unknown'))}</td>"
                      f"<td><ul>{cve_items or '<li><em>No mapped CVEs</em></li>'}</ul></td></tr>")
         kev_note = ''
         try:
-            kev_total = sum(1 for e in cve_rows_list for c in (e.get('cves') or []) if c.get('kev'))
+            kev_total = sum(1 for e in cve_rows_list for c in (e.get('cves') or []) if isinstance(c, dict) and c.get('kev'))
             if kev_total:
                 kev_note = (f"<p><strong style=\"color:#ff4444;\">{kev_total} CVE(s) are on the "
                             f"CISA KEV catalog (exploited in the wild) - patch first.</strong></p>")
@@ -1603,12 +1635,15 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     else:
         cve_section = ''
 
-    tools = audit.get('external_tools', []) or []
+    tools = [e for e in (audit.get('external_tools') or []) if isinstance(e, dict)]
     if tools:
         tool_rows = ''
         for entry in tools:
             status = str(entry.get('status', ''))
-            matched = int(entry.get('matched', 0) or 0)
+            try:
+                matched = int(entry.get('matched', 0) or 0)
+            except (TypeError, ValueError):
+                matched = 0
             if status == 'executed':
                 tool_name = str(entry.get('tool', ''))
                 if tool_name == 'nuclei':
@@ -1650,15 +1685,20 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     else:
         tool_section = ''
 
-    ai = audit.get('ai_assistant', {}) or {}
+    ai = audit.get('ai_assistant') or {}
+    if not isinstance(ai, dict):
+        ai = {}
     ai_section = ''
     if ai:
+        _cons = ai.get('consolidation') or {}
+        if not isinstance(_cons, dict):
+            _cons = {}
         fp_rows = ''.join(
             f"<tr><td>{html.escape(str(f.get('type', '')))}</td>"
             f"<td><code>{html.escape(str(f.get('url', '')))}</code></td>"
             f"<td>{html.escape(str(f.get('reason', ''))[:200])}</td>"
             f"<td>{f.get('confidence', '')}</td></tr>"
-            for f in (ai.get('false_positive_details') or [])[:20]
+            for f in (ai.get('false_positive_details') or [])[:20] if isinstance(f, dict)
         )
         ai_section = f"""
     <h2>AI Advisory Notes</h2>
@@ -1668,13 +1708,13 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
        positives for review; flagged findings are excluded from active
        testing/exploitation but never deleted (see the table below).
        Deterministic validation remains authoritative.
-       Statements: {ai.get('statement_count', 0)}.
-       Consolidated {ai.get('consolidation', {}).get('raw_findings', 0)} raw detections into
-       {ai.get('consolidation', {}).get('unique_findings', 0)} unique findings.</p>
+        Statements: {ai.get('statement_count', 0)}.
+        Consolidated {_cons.get('raw_findings', 0)} raw detections into
+        {_cons.get('unique_findings', 0)} unique findings.</p>
     {'<table><thead><tr><th>Type</th><th>URL</th><th>AI reason</th><th>Conf.</th></tr></thead><tbody>' + fp_rows + '</tbody></table>' if fp_rows else '<p><em>No false-positive hypotheses raised.</em></p>'}"""
 
     exploit_section = ''
-    attempts = audit.get('exploitation_attempts', []) or []
+    attempts = [a for a in (audit.get('exploitation_attempts') or []) if isinstance(a, dict)]
     if attempts:
         attempt_rows = ''
         badge = {'confirmed': '#2e7d32', 'possible': '#b8860b', 'inconclusive': '#4a4a5a'}

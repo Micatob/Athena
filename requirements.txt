@@ -28,6 +28,9 @@ cryptography>=41.0.0
 aiohttp-socks>=0.8.0
 httpx>=0.24.0
 
+# Optional engines (pip-installable; Go binaries via scripts/install_tools.py)
+wafw00f>=2.4.0
+
 # PDF & Charts
 matplotlib>=3.8.0
 

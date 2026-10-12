@@ -162,3 +162,50 @@ def test_attempts_loop_survives_none_attempt(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert summary['status'] == 'executed'
     assert 'timed out after 40s' in out
+
+
+def test_ogitech_report_crash_repro():
+    """2026-10-12 ogitech.edu.ng: Fatal error after exploitation loop.
+
+    Mixed None entries across discovery/techs/exploitation/external-tools
+    must never kill generate_comprehensive_report or the HTML renderer.
+    """
+    import athena
+    gen = ReportGenerator()
+    data = {
+        'target': 'https://ogitech.edu.ng',
+        'vulnerabilities': [
+            None,
+            {'id': 'a1', 'type': 'SQL Injection',
+             'url': 'https://ogitech.edu.ng/?id=1', 'severity': 'HIGH',
+             'description': 'd1'},
+        ],
+        'discovery': {
+            'urls': ['https://ogitech.edu.ng/'],
+            'technologies': ['Apache', None, 'cPanel'],
+            'technologies_with_confidence': [
+                None,
+                {'technology': 'jQuery', 'version': '3.7.1', 'confidence': 3},
+            ],
+            'ports': [80, 443],
+        },
+        'exploitation': [
+            None,
+            {'type': 'XSS', 'url': 'https://ogitech.edu.ng/?q=1',
+             'status': 'inconclusive'},
+        ],
+        'bruteforce': {'web_logins': [None], 'admin_panels': [None]},
+        'enumeration': {'smtp_25': None},
+        'cve_mapping': [None],
+        'external_tools': [
+            None,
+            {'tool': 'dalfox', 'status': 'executed', 'matched': 0,
+             'target': 'https://ogitech.edu.ng', 'duration_s': 4},
+        ],
+        'ai_analysis': {'statements': [], 'filtered_findings': [None],
+                        'consolidation': None},
+    }
+    report = gen.generate_comprehensive_report(data)
+    assert report['athena_security_audit']['audit_summary']['total_vulnerabilities'] == 1
+    html_out = athena._generate_html_report(report)
+    assert 'ogitech' in html_out.lower() or 'SQL Injection' in html_out

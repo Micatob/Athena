@@ -405,6 +405,7 @@ class ReportGenerator:
     def generate_comprehensive_report(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """Generate comprehensive penetration test report with professional auditor focus."""
         # Filter and deduplicate vulnerabilities
+        results = results if isinstance(results, dict) else {}
         all_vulns = results.get('vulnerabilities', [])
         deduped_vulns = self._dedup_vulnerabilities(all_vulns)
         filtered_vulns = deduped_vulns[:self.MAX_REPORT_FINDINGS]
@@ -447,7 +448,9 @@ class ReportGenerator:
         vulnerability_details = self._generate_vulnerability_details(filtered_vulns)
 
         no_findings = len(filtered_vulns) == 0 and not unique_exploits
-        discovery = results.get('discovery', {})
+        discovery = results.get('discovery') or {}
+        if not isinstance(discovery, dict):
+            discovery = {}
 
         # The findings registry is only populated by engagement workflows;
         # fall back to the scan's own (deduplicated) findings so the section
@@ -658,17 +661,22 @@ class ReportGenerator:
             return {"raw": str(post_assessment)[:2000]}
         summary = {"engagement_id": post_assessment.get("engagement_id", ""),
                    "sessions": []}
-        for session in post_assessment.get("sessions", []):
-            modules = session.get("modules", {})
+        for session in (post_assessment.get("sessions") or []):
+            if not isinstance(session, dict):
+                continue
+            modules = session.get("modules") or {}
+            if not isinstance(modules, dict):
+                modules = {}
             summary["sessions"].append({
                 "session_id": session.get("session_id", ""),
                 "target": session.get("target", ""),
                 "status": {
-                    name: mod.get("status")
+                    name: (mod.get("status") if isinstance(mod, dict) else None)
                     for name, mod in modules.items()
                 },
                 "findings_count": sum(
-                    len(mod.get("findings", [])) for mod in modules.values()
+                    len(mod.get("findings", []) or []) for mod in modules.values()
+                    if isinstance(mod, dict)
                 ),
             })
         return summary
@@ -847,7 +855,7 @@ class ReportGenerator:
     def generate_tech_suggestions(self, technologies: List[str], technologies_with_confidence: List[Dict] = None) -> List[Dict]:
         """Generate technology-specific hardening suggestions."""
         suggestions = []
-        techs = [t.lower() for t in technologies or []]
+        techs = [t.lower() for t in (technologies or []) if isinstance(t, str)]
 
         mapping = {
             'cloudflare': 'Verify origin shielding and authenticated origin pulls.',
@@ -883,11 +891,12 @@ class ReportGenerator:
 
     def generate_cve_lookup(self, technologies: List[str], technologies_with_confidence: List[Dict] = None) -> List[Dict]:
         """Map detected versioned technologies to known CVEs using live NVD API + curated fallback.
-        
+
         Only technologies with confidence >= 2 are processed for CVE lookup.
         """
         if technologies_with_confidence:
-            filtered = [t['technology'] for t in technologies_with_confidence if t.get('confidence', 3) >= 2]
+            filtered = [t.get('technology') for t in (technologies_with_confidence or [])
+                        if isinstance(t, dict) and t.get('confidence', 3) >= 2 and t.get('technology')]
             return self._generate_cve_lookup_sync(filtered)
         return self._generate_cve_lookup_sync(technologies)
 
@@ -1175,14 +1184,20 @@ class ReportGenerator:
             resp = urllib.request.urlopen(full_url, timeout=8)
             if resp.getcode() == 200:
                 data = json.loads(resp.read().decode('utf-8'))
-                vulnerabilities = data.get('vulnerabilities', [])
+                vulnerabilities = data.get('vulnerabilities', []) or []
                 results = []
                 for item in vulnerabilities:
-                    cve = item.get('cve', {})
+                    if not isinstance(item, dict):
+                        continue
+                    cve = item.get('cve') or {}
+                    if not isinstance(cve, dict):
+                        continue
                     cve_id = cve.get('id', '')
-                    descriptions = cve.get('descriptions', [])
+                    descriptions = cve.get('descriptions', []) or []
                     description = ''
                     for d in descriptions:
+                        if not isinstance(d, dict):
+                            continue
                         if d.get('lang') == 'en':
                             description = d.get('value', '')[:120]
                             break
@@ -1200,6 +1215,8 @@ class ReportGenerator:
         results = []
         seen = set()
         for tech_str in (technologies or []):
+            if not isinstance(tech_str, str):
+                continue
             t = tech_str.strip()
             parts = t.rsplit(' ', 1)
             if len(parts) != 2:
@@ -1232,8 +1249,8 @@ class ReportGenerator:
 
     def generate_remediation_plan(self, vulnerabilities: List[Dict]) -> Dict:
         """Generate detailed multi-phase remediation plan."""
-        critical = [v for v in vulnerabilities if v.get('severity') == 'CRITICAL']
-        high = [v for v in vulnerabilities if v.get('severity') == 'HIGH']
+        critical = [v for v in (vulnerabilities or []) if isinstance(v, dict) and v.get('severity') == 'CRITICAL']
+        high = [v for v in (vulnerabilities or []) if isinstance(v, dict) and v.get('severity') == 'HIGH']
         
         return {
             'phases': [

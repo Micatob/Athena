@@ -533,6 +533,20 @@ that enforces four rules:
 4. **Bounded** - every run has a wall-clock timeout, a findings cap and a
    rate limit, and the argv is recorded in the report.
 
+### Installing the engines (one command, per-user, GitHub-safe)
+
+```powershell
+python scripts/install_tools.py
+python scripts/install_tools.py --verify-only
+python athena.py --list-tools
+```
+
+Downloads official releases at install time (nothing binary is committed):
+nuclei, dalfox, ProjectDiscovery httpx, sqlmap into
+`%LOCALAPPDATA%\Programs\athena-tools` (Windows) or `~/.local/bin`
+(Linux), plus `pip install wafw00f`. Missing tools stay `unavailable`
+and the native scan still runs.
+
 ### nuclei
 
 ```powershell
