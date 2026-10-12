@@ -154,15 +154,27 @@ class TestSQLInjectionDetection:
         scanner = make_scanner()
         url = 'http://sqli.test.local/page?id=1'
 
-        with aioresponses() as mock_http:
-            # Return a SQL error message for any request to this host
-            mock_http.get(
-                re.compile(r'.*sqli\.test\.local'),
-                status=500,
-                body="mysql error: You have an error in your SQL syntax",
-                repeat=True,
-            )
+        from aioresponses import CallbackResult
+        from urllib.parse import urlparse, parse_qs, unquote
 
+        def _sqli_cb(url, **kwargs):
+            # Differential mock: baseline (id=1) is clean, injection carries error
+            try:
+                qs = parse_qs(urlparse(str(url)).query)
+                vals = ' '.join(v for vs in qs.values() for v in vs)
+                low = unquote(vals).lower()
+                if any(t in low for t in ["' or", 'union', 'extractvalue', 'updatexml', 'concat']):
+                    return CallbackResult(status=500,
+                        body="mysql error: You have an error in your SQL syntax")
+            except Exception:
+                pass
+            # Baseline / benign
+            if 'id=1' in str(url) and "'" not in unquote(str(url)):
+                return CallbackResult(status=200, body='<html>Hello World</html>')
+            return CallbackResult(status=200, body='<html>Hello World</html>')
+
+        with aioresponses() as mock_http:
+            mock_http.get(re.compile(r'.*sqli\.test\.local'), callback=_sqli_cb, repeat=True)
             params = {'id': ['1']}
             results = await scanner.test_sql_injection_aggressive(url, params)
 
@@ -203,17 +215,27 @@ class TestXSSDetection:
     @pytest.mark.asyncio
     async def test_detects_reflected_xss(self):
         scanner = make_scanner()
-        xss_payload = "<script>alert('XSS')</script>"
         url = 'http://xss.test.local/search?q=test'
 
-        with aioresponses() as mock_http:
-            mock_http.get(
-                re.compile(r'.*xss\.test\.local'),
-                status=200,
-                body=f'<html>Results: {xss_payload}</html>',
-                repeat=True,
-            )
+        from aioresponses import CallbackResult
+        from urllib.parse import urlparse, parse_qs, unquote
 
+        def _xss_cb(url, **kwargs):
+            # Live-reflection mock: echo the q param verbatim (unencoded)
+            try:
+                qs = parse_qs(urlparse(str(url)).query)
+                val = (qs.get('q', [''])[0])
+                val = unquote(val)
+                if 'athbaseline1' in val or val == 'test':
+                    return CallbackResult(status=200, body='<html>Search page</html>',
+                        headers={'Content-Type': 'text/html'})
+                return CallbackResult(status=200, body=f'<html>Results: {val}</html>',
+                    headers={'Content-Type': 'text/html'})
+            except Exception:
+                return CallbackResult(status=200, body='<html>Search page</html>')
+
+        with aioresponses() as mock_http:
+            mock_http.get(re.compile(r'.*xss\.test\.local'), callback=_xss_cb, repeat=True)
             params = {'q': ['test']}
             results = await scanner.test_xss_aggressive(url, params)
 
@@ -614,6 +636,14 @@ class TestOpenRedirect:
         params = {'url': ['http://evil.com']}
 
         with aioresponses() as mock_http:
+            # Benign baseline (safe param value) must NOT redirect to evil —
+            # registered first so it wins over the blanket evil mock below.
+            mock_http.get(
+                re.compile(r'.*redirect\.test\.local.*athena-benign-home'),
+                status=200,
+                headers={},
+                repeat=True,
+            )
             mock_http.get(
                 re.compile(r'.*redirect\.test\.local'),
                 status=302,
@@ -999,13 +1029,19 @@ class TestHostHeaderInjection:
         scanner = make_scanner()
         url = 'http://hhi.test.local/'
 
+        from aioresponses import CallbackResult
+
+        def _hhi_cb(url, **kwargs):
+            # Differential mock: reflect the Host header verbatim
+            try:
+                headers = kwargs.get('headers', {}) or {}
+                host = headers.get('Host', '')
+                return CallbackResult(status=200, body=f'<html>Host: {host}</html>')
+            except Exception:
+                return CallbackResult(status=200, body='<html>Welcome</html>')
+
         with aioresponses() as mock_http:
-            mock_http.get(
-                re.compile(r'.*hhi\.test\.local'),
-                status=200,
-                body='<html>evil.com</html>',
-                repeat=True,
-            )
+            mock_http.get(re.compile(r'.*hhi\.test\.local'), callback=_hhi_cb, repeat=True)
             results = await scanner.test_host_header_injection(url)
 
         hhi = [v for v in results if 'Host Header' in v.get('type', '')]
@@ -1045,34 +1081,30 @@ class TestHTTPMethodFuzzing:
         scanner = make_scanner()
         url = 'http://methods.test.local/'
 
+        from aioresponses import CallbackResult
+        _store = {}
+
+        def _put_cb(url, **kwargs):
+            try:
+                _store[str(url)] = kwargs.get('data', '')
+            except Exception:
+                pass
+            return CallbackResult(status=201, body='Created')
+
+        def _get_cb(url, **kwargs):
+            body = _store.get(str(url), '')
+            if body:
+                return CallbackResult(status=200, body=str(body))
+            return CallbackResult(status=404, body='Not found')
+
         with aioresponses() as mock_http:
-            mock_http.put(
-                re.compile(r'.*methods\.test\.local'),
-                status=200,
-                body='',
-                repeat=True,
-            )
-            # Other methods return 405
-            mock_http.delete(
-                re.compile(r'.*methods\.test\.local'),
-                status=405,
-                repeat=True,
-            )
-            mock_http.patch(
-                re.compile(r'.*methods\.test\.local'),
-                status=405,
-                repeat=True,
-            )
-            mock_http.options(
-                re.compile(r'.*methods\.test\.local'),
-                status=405,
-                repeat=True,
-            )
-            mock_http.head(
-                re.compile(r'.*methods\.test\.local'),
-                status=405,
-                repeat=True,
-            )
+            # PUT writes, GET reads back — proof-of-write mock
+            mock_http.put(re.compile(r'.*methods\.test\.local'), callback=_put_cb, repeat=True)
+            mock_http.get(re.compile(r'.*methods\.test\.local'), callback=_get_cb, repeat=True)
+            mock_http.delete(re.compile(r'.*methods\.test\.local'), status=405, repeat=True)
+            mock_http.patch(re.compile(r'.*methods\.test\.local'), status=405, repeat=True)
+            mock_http.options(re.compile(r'.*methods\.test\.local'), status=405, repeat=True)
+            mock_http.head(re.compile(r'.*methods\.test\.local'), status=405, repeat=True)
 
             results = await scanner.test_http_method_fuzzing(url)
 
@@ -1114,13 +1146,21 @@ class TestCachePoisoning:
         scanner = make_scanner()
         url = 'http://cache.test.local/'
 
+        from aioresponses import CallbackResult
+
+        def _cache_cb(url, **kwargs):
+            # Differential mock: reflect unkeyed poison headers, clean otherwise
+            try:
+                headers = kwargs.get('headers', {}) or {}
+                for h in ('X-Forwarded-Host', 'X-Host', 'X-Forwarded-Server'):
+                    if h in headers and headers[h]:
+                        return CallbackResult(status=200, body=f"<html>Host: {headers[h]}</html>")
+                return CallbackResult(status=200, body='<html>Welcome</html>')
+            except Exception:
+                return CallbackResult(status=200, body='<html>Welcome</html>')
+
         with aioresponses() as mock_http:
-            mock_http.get(
-                re.compile(r'.*cache\.test\.local'),
-                status=200,
-                body='<html>evil.com</html>',
-                repeat=True,
-            )
+            mock_http.get(re.compile(r'.*cache\.test\.local'), callback=_cache_cb, repeat=True)
             results = await scanner.test_cache_poisoning(url)
 
         cache = [v for v in results if 'Cache Poisoning' in v.get('type', '')]

@@ -1128,8 +1128,9 @@ async def run_httpx(target: str,
     if not binary:
         return _unavailable(tool, tool, f'httpx is not installed - {TOOL_INSTALL_HINTS[tool]}')
     if not await _httpx_is_pd(binary):
-        return _unavailable(tool, binary, 'found httpx is the Python httpx package, not ProjectDiscovery httpx - '
-                                          'install the PD build (Kali: sudo apt install httpx-toolkit or go install)')
+        return _unavailable(tool, binary, 'PATH httpx resolves to Python httpx lib, not ProjectDiscovery httpx '
+                                          '(PD flags rejected) - install PD build + ensure it precedes Python Scripts on PATH '
+                                          '(Kali: sudo apt install httpx-toolkit; Win: go install github.com/projectdiscovery/httpx/cmd/httpx@latest)')
     argv: List[str] = [binary, '-u', target, '-json', '-silent', '-nc',
                        '-tech-detect', '-status-code', '-title',
                        '-web-server', '-ip', '-follow-redirects',

@@ -429,7 +429,12 @@ Respond with JSON:
   ]
 }}""",
         
-        "attack_path": """You are an attack path analyzer. Identify how findings connect into attack chains.
+        "attack_path": """You are an attack path analyzer. Identify how VERIFIED findings connect into attack chains.
+RULES (fail closed):
+- Only chain findings with deterministic evidence or verified=true. Unverified scanner observations are hypotheses, never footholds.
+- NEVER recommend privesc, lateral movement, credential dumping, or persistence unless context includes an authorized shell/session. Without a shell, stop at initial-access hypotheses and manual confirmation steps.
+- Label every path with confidence and required manual confirmation (curl/Burp replay).
+- If no verified findings exist, return zero paths, not generic post-exploitation advice.
 
 Findings:
 {findings}
@@ -486,6 +491,7 @@ Respond with JSON:
         "next_steps": """You are a security assessment advisor. Based on the current findings and
 post-exploitation context, suggest the next assessment steps. Label each as a
 RECOMMENDATION and do not assert unverified facts as confirmed.
+FORBIDDEN without an authorized shell/session: privilege escalation testing, lateral movement mapping, credential dumping, persistence, foothold stability checks. Those are post-exploitation only. For web-only findings, recommend manual confirmation (curl/Burp), header/CSP fixes, and WAF tuning instead.
 
 Context:
 {context}
@@ -642,7 +648,16 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                     _register_rate_limit(provider, self.logger)
                 retryable = status in RETRYABLE_STATUS
                 if not retryable or attempt >= MAX_RATE_LIMIT_RETRIES:
-                    self.logger.warning(f"LLM call failed ({provider.value}): {e}")
+                    # Collapse log spam: first 2 failures warn, rest debug
+                    # (prod run printed 6x identical gemini lines).
+                    try:
+                        _n = int(getattr(self, 'call_failures', 0))
+                    except Exception:
+                        _n = 0
+                    if _n < 2:
+                        self.logger.warning(f"LLM call failed ({provider.value}): {e}")
+                    else:
+                        self.logger.debug(f"LLM call failed ({provider.value}) #{_n+1}: {e}")
                     self.call_failures += 1
                     _CALL_FAILURES += 1
                     return None
@@ -1330,8 +1345,8 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         self,
         findings: List[Dict[str, Any]],
         evidence: Optional[List[Dict[str, Any]]] = None,
-        batch_size: int = 20,
-        max_batches: int = 10
+        batch_size: int = 40,
+        max_batches: int = 5
     ) -> List[AIStatement]:
         """Ask the LLM for false-positive hypotheses about scan findings.
 

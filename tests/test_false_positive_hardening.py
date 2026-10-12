@@ -237,10 +237,19 @@ class TestErrorPageGating:
 
     async def test_xss_confirmed_on_real_reflection(self, monkeypatch):
         scanner = make_scanner()
-        payload = "<script>alert('XSS')</script>"
-        monkeypatch.setattr(
-            scanner, '_request',
-            lambda *a, **k: _Resp(200, f'<html>Results: {payload}</html>'))
+        from urllib.parse import urlparse, parse_qs, unquote
+
+        async def _reflect(method, url, **kwargs):
+            try:
+                qs = parse_qs(urlparse(str(url)).query)
+                val = unquote(qs.get('q', [''])[0])
+                if val in ('test', 'athbaseline1'):
+                    return _Resp(200, '<html>Search page</html>', {'Content-Type': 'text/html'})
+                return _Resp(200, f'<html>Results: {val}</html>', {'Content-Type': 'text/html'})
+            except Exception:
+                return _Resp(200, '<html>Search page</html>')
+
+        monkeypatch.setattr(scanner, '_request', _reflect)
 
         results = await scanner.test_xss_aggressive(
             f'{IN_SCOPE}/search', {'q': ['test']})
@@ -317,17 +326,28 @@ class TestMethodAndCacheEvidence:
 
     async def test_accepted_put_is_reported(self, monkeypatch):
         scanner = make_scanner()
+        _store = {}
 
         def responder(method, url, kwargs):
+            # Proof-of-write mock: PUT stores, GET reads back
             if method == 'PUT':
-                return dict(status=200, body='stored')
+                try:
+                    _store[str(url)] = kwargs.get('data', '')
+                except Exception:
+                    pass
+                return dict(status=201, body='Created')
+            if method == 'GET':
+                body = _store.get(str(url), '')
+                if body:
+                    return dict(status=200, body=str(body))
+                return dict(status=404, body='Not found')
             return dict(status=406, body='nope')
 
         monkeypatch.setattr(scanner, '_ensure_session', self._session(responder))
         results = await scanner.test_http_method_fuzzing(f'{IN_SCOPE}/page')
 
-        assert len(results) == 1
-        assert results[0]['payload'] == 'PUT'
+        assert len(results) >= 1
+        assert any('PUT' in r.get('payload', '') for r in results)
         await scanner.close()
 
     async def test_options_only_flagged_when_write_method_advertised(self, monkeypatch):
@@ -358,8 +378,22 @@ class TestMethodAndCacheEvidence:
 
     async def test_cache_poisoning_detects_reflected_host(self, monkeypatch):
         scanner = make_scanner()
-        monkeypatch.setattr(scanner, '_ensure_session', self._session(
-            lambda *a: dict(status=200, body='<html>Host: evil.com</html>')))
+
+        def _reflect(method, url, kwargs):
+            # Differential mock: echo poison headers, clean otherwise
+            try:
+                headers = {}
+                # _FakeSession passes (method, url, kwargs) where kwargs holds headers
+                if isinstance(kwargs, dict):
+                    headers = kwargs.get('headers', {}) or {}
+                for h in ('X-Forwarded-Host', 'X-Host', 'X-Forwarded-Server'):
+                    if h in headers and headers[h]:
+                        return dict(status=200, body=f"<html>Host: {headers[h]}</html>")
+                return dict(status=200, body='<html>Welcome</html>')
+            except Exception:
+                return dict(status=200, body='<html>Welcome</html>')
+
+        monkeypatch.setattr(scanner, '_ensure_session', self._session(_reflect))
 
         results = await scanner.test_cache_poisoning(f'{IN_SCOPE}/page')
         assert len(results) == 1

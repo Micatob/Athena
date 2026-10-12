@@ -76,7 +76,9 @@ class TestObservationsNotConfirmed:
     def test_unverified_rows_read_as_observations(self):
         report = _report(vulnerabilities=[self._finding()])
         html = athena._generate_html_report(report)
-        assert 'Observations (scanner detections, not actively proven)' in html
+        # Hardened labels: unverified leads, never presented as confirmed
+        assert ('Unverified observations' in html
+                or 'Observations (scanner detections, not actively proven)' in html)
         assert '>CONFIRMED<' not in html
 
     def test_verified_rows_are_marked_confirmed(self):
@@ -85,8 +87,9 @@ class TestObservationsNotConfirmed:
                           verification={'status': 'confirmed'})])
         html = athena._generate_html_report(report)
         assert '>CONFIRMED<' in html
-        assert 'Detection Details (confirmed rows verified)' in html or \
-            'confirmed rows marked' in html
+        assert ('Confirmed proof' in html
+                or 'Detection Details (confirmed rows verified)' in html or
+                'confirmed rows marked' in html)
 
     def test_rows_carry_verification_state(self):
         details = _report(vulnerabilities=[

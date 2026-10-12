@@ -195,6 +195,59 @@ SEVERITY_THRESHOLDS = {
     'LOW': 0.0,
 }
 
+#: NVD CPE ``virtualMatchString`` mapping (vendor, product).  A CPE match is
+#: authoritative for "this version is affected"; keyword search only proves
+#: the version is *mentioned* (often in "fixed in" text), so CPE wins.
+CPE_MAP: Dict[str, Tuple[str, str]] = {
+    'php': ('php', 'php'),
+    'exim': ('exim', 'exim'),
+    'dovecot': ('dovecot', 'dovecot'),
+    'apache': ('apache', 'http_server'),
+    'nginx': ('nginx', 'nginx'),
+    'openssh': ('openbsd', 'openssh'),
+    'mysql': ('mysql', 'mysql'),
+    'postgresql': ('postgresql', 'postgresql'),
+    'openssl': ('openssl', 'openssl'),
+    'tomcat': ('apache', 'tomcat'),
+    'iis': ('microsoft', 'iis'),
+    'redis': ('redislabs', 'redis'),
+    'wordpress': ('wordpress', 'wordpress'),
+    'drupal': ('drupal', 'drupal'),
+    'joomla': ('joomla', 'joomla'),
+    'python': ('python', 'python'),
+    'node.js': ('nodejs', 'node'),
+    'nodejs': ('nodejs', 'node'),
+    'gitlab': ('gitlab', 'gitlab'),
+    'jenkins': ('jenkins', 'jenkins'),
+    'grafana': ('grafana', 'grafana'),
+    'mongodb': ('mongodb', 'mongodb'),
+    'docker': ('docker', 'docker'),
+    'kubernetes': ('kubernetes', 'kubernetes'),
+}
+
+_NAME_VERSION_RE = re.compile(r'^(.*?)[\s/:]+(v?\d+(?:\.\d+)*(?:[a-z]\d+)?)$',
+                              re.IGNORECASE)
+
+
+def split_name_version(name: str, version: str = '') -> Tuple[str, str]:
+    """Return ``(product, version)`` from a technology entry.
+
+    Tech lists often carry the version inline ('PHP 8.0.30') with no
+    separate ``version`` key — that mismatch silently disabled every lookup
+    before (0 CVEs reported even though NVD works).  Handles both shapes.
+    """
+    version = (version or '').strip().lstrip('vV')
+    if version:
+        return name.strip(), version
+    name = (name or '').strip()
+    m = _NAME_VERSION_RE.match(name)
+    if m:
+        base = re.sub(r'\(.*?\)$', '', m.group(1)).strip()   # drop '(suspected)'
+        ver = m.group(2).lstrip('vV')
+        if base and ver and not base.lower().startswith('v'):
+            return base, ver
+    return name, ''
+
 
 class CVEMapper:
     def __init__(self, db_path: Optional[str] = None):
@@ -203,6 +256,9 @@ class CVEMapper:
         self._cache_ttl: Dict[str, float] = {}
         self._cache_duration = 3600
         self.db_path = db_path
+        #: NVD rate-limit gate: unauthenticated = 5 req/30s (6.2s spacing);
+        #: with NVD_API_KEY env set = 50 req/30s (0.6s spacing).
+        self._nvd_last = 0.0
 
     def _get_cvss_severity(self, score: float) -> str:
         for severity, threshold in sorted(SEVERITY_THRESHOLDS.items(), key=lambda x: -x[1]):
@@ -235,34 +291,136 @@ class CVEMapper:
                         ))
         return results
 
+    async def _nvd_get(self, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """One rate-limited, retried NVD API 2.0 request.  Never raises."""
+        import urllib.request, urllib.parse
+        api_key = os.environ.get('NVD_API_KEY', '').strip()
+        if api_key:
+            params = {**params, 'apiKey': api_key}
+        url = ('https://services.nvd.nist.gov/rest/json/cves/2.0?'
+               + urllib.parse.urlencode(params))
+        gap = 0.6 if api_key else 6.2
+        wait = self._nvd_last + gap - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        for attempt in (1, 2):
+            try:
+                req = urllib.request.Request(
+                    url, headers={'User-Agent': 'Athena-Security-Suite/3.0'})
+                loop = asyncio.get_event_loop()
+                resp = await loop.run_in_executor(
+                    None, lambda: urllib.request.urlopen(req, timeout=20))
+                self._nvd_last = time.time()
+                if resp.getcode() == 200:
+                    return json.loads(resp.read().decode('utf-8'))
+                return None
+            except Exception as e:
+                self._nvd_last = time.time()
+                self.logger.debug('NVD request failed (attempt %d): %s', attempt, e)
+                if attempt == 1:
+                    await asyncio.sleep(3.0)   # transient 503/timeout: one retry
+        return None
+
+    @staticmethod
+    def _parse_nvd_items(data: Optional[Dict[str, Any]]) -> List[CVEResult]:
+        results: List[CVEResult] = []
+        for item in (data or {}).get('vulnerabilities', []):
+            cve = item.get('cve', {})
+            cve_id = cve.get('id', '')
+            if not cve_id:
+                continue
+            descriptions = cve.get('descriptions', [])
+            desc = next((d.get('value', '') for d in descriptions
+                         if d.get('lang') == 'en'), '')
+            score = None
+            metrics = cve.get('metrics', {})
+            for key in ('cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2'):
+                entries = metrics.get(key)
+                if entries:
+                    score = (entries[0].get('cvssData', {}) or {}).get('baseScore')
+                    if score is not None:
+                        break
+            results.append(CVEResult(cve_id=cve_id, description=desc[:300],
+                                     cvss_score=score))
+        return results
+
+    @staticmethod
+    def _already_fixed(description: str, version: str) -> bool:
+        """True when a CVE description says it was fixed *at* the version the
+        target runs — 'Exim before 4.100.1' does not affect Exim 4.100.1, so
+        matching it would be a false CVE claim in the report."""
+        d = (description or '').lower()
+        v = (version or '').lower()
+        if not d or not v:
+            return False
+        return any(p in d for p in (f'before {v}', f'fixed in {v}',
+                                    f'prior to {v}', f'earlier than {v}'))
+
+    async def _lookup_live(self, name_lower: str, name: str,
+                           version: str) -> List[CVEResult]:
+        """Live NVD lookup.  CPE ``virtualMatchString`` first (authoritative
+        'affects this version'), then keyword search as fallback.
+
+        CPE versions escalate: exact ('4.100.1') -> drop patch ('4.100') when
+        the exact CPE does not exist; matches found via a shortened variant
+        are then filtered for 'fixed in <full version>' text so an already-
+        patched target never gets a false CVE row.  Keyword only runs when
+        CPE found nothing (or product has no CPE), which keeps us inside the
+        5-req/30s anonymous rate limit.
+        """
+        if not version:
+            return []
+        cache_key = f'live:{name_lower}:{version}'
+        now = time.time()
+        if cache_key in self._cache and now - self._cache_ttl.get(cache_key, 0) < self._cache_duration:
+            return self._cache[cache_key]
+        cves: List[CVEResult] = []
+        product = CPE_MAP.get(name_lower)
+        if product:
+            vendor, prod = product
+            variants = [version]
+            parts = version.split('.')
+            if len(parts) > 2:
+                variants.append('.'.join(parts[:2]))   # 4.100.1 -> 4.100
+            for ver_variant in variants:
+                data = await self._nvd_get({
+                    'virtualMatchString':
+                        f'cpe:2.3:a:{vendor}:{prod}:{ver_variant}:*:*:*:*:*:*:*',
+                        'resultsPerPage': 20})
+                found = self._parse_nvd_items(data)
+                if found:
+                    seen = set()
+                    for c in found:
+                        if c.cve_id in seen:
+                            continue
+                        seen.add(c.cve_id)
+                        if self._already_fixed(c.description, version):
+                            continue      # patched at target's version
+                        cves.append(c)
+                    break
+        if not cves:
+            data = await self._nvd_get({'keywordSearch': f'{name} {version}',
+                                        'resultsPerPage': 10})
+            cves = [c for c in self._parse_nvd_items(data)
+                    if not self._already_fixed(c.description, version)]
+        if cves:
+            self._cache[cache_key] = cves
+            self._cache_ttl[cache_key] = now
+        return cves
+
     async def query_nvd_api(self, keyword: str) -> Optional[List[CVEResult]]:
+        """Keyword search against live NVD (kept for callers/back-compat)."""
         now = time.time()
         cache_key = f"nvd:{keyword}"
         if cache_key in self._cache and now - self._cache_ttl.get(cache_key, 0) < self._cache_duration:
             return self._cache[cache_key]
-        try:
-            import urllib.request, urllib.error
-            url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={urllib.parse.quote(keyword)}&resultsPerPage=10"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Athena-Security-Suite/3.0'})
-            resp = await asyncio.get_event_loop().run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=10))
-            if resp.getcode() == 200:
-                data = json.loads(resp.read().decode('utf-8'))
-                results = []
-                for item in data.get('vulnerabilities', []):
-                    cve = item.get('cve', {})
-                    cve_id = cve.get('id', '')
-                    descriptions = cve.get('descriptions', [])
-                    desc = next((d.get('value', '')[:200] for d in descriptions if d.get('lang') == 'en'), '')
-                    metrics = cve.get('metrics', {})
-                    cvss_v3 = metrics.get('cvssMetricV31', [{}])[0].get('cvssData', {}) if metrics.get('cvssMetricV31') else {}
-                    score = cvss_v3.get('baseScore')
-                    results.append(CVEResult(cve_id=cve_id, description=desc, cvss_score=score))
-                if results:
-                    self._cache[cache_key] = results
-                    self._cache_ttl[cache_key] = now
-                    return results
-        except Exception as e:
-            self.logger.debug(f"NVD API query failed for '{keyword}': {e}")
+        data = await self._nvd_get({'keywordSearch': keyword,
+                                    'resultsPerPage': 10})
+        results = self._parse_nvd_items(data)
+        if results:
+            self._cache[cache_key] = results
+            self._cache_ttl[cache_key] = now
+            return results
         return None
 
     async def check_exploit_db(self, cve_id: str) -> Tuple[bool, Optional[str]]:
@@ -282,20 +440,29 @@ class CVEMapper:
 
     async def map_versions(self, technologies: List[Dict[str, Any]]) -> List[VersionCVEResult]:
         results = []
+        seen = set()
         for tech in technologies:
-            name = tech.get('technology', '')
-            version = tech.get('version', '')
+            raw_name = tech.get('technology', '')
+            name, version = split_name_version(raw_name, tech.get('version', ''))
             confidence = tech.get('confidence', 3)
             if not version:
+                continue          # nothing versioned to map; name alone is noise
+            dedupe_key = f'{name.lower()}:{version}'
+            if dedupe_key in seen:
                 continue
+            seen.add(dedupe_key)
             name_lower = name.strip().lower()
             cves = self._lookup_curated(name_lower, version)
-            nvd_results = await self.query_nvd_api(f"{name} {version}")
-            if nvd_results:
-                existing_ids = {c.cve_id for c in cves}
-                for cve in nvd_results:
-                    if cve.cve_id not in existing_ids:
-                        cves.append(cve)
+            try:
+                live = await self._lookup_live(name_lower, name.strip(), version)
+            except Exception as e:       # offline? rate-limited? scan continues
+                self.logger.debug('live NVD lookup failed for %s %s: %s',
+                                  name, version, e)
+                live = []
+            existing_ids = {c.cve_id for c in cves}
+            for cve in live:
+                if cve.cve_id not in existing_ids:
+                    cves.append(cve)
             max_cvss = max((c.cvss_score for c in cves if c.cvss_score), default=None)
             results.append(VersionCVEResult(
                 technology=name, version=version, confidence=confidence,

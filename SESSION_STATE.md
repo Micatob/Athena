@@ -485,3 +485,32 @@ python -m pytest tests/test_external_tools.py tests/test_tool_bridge.py -q
 - `SESSION_STATE.md` keeps keys redacted (`gsk_REDACTED`).
 - ffuf intentionally NOT integrated (deferred); nmap intentionally NOT
   integrated (Kali-native per operator).
+
+---
+
+# Athena Session - 2026-10-09 (paused, device overheating)
+
+## Status: P0+P1 FIXES APPLIED, UNCOMMITTED — resume with rerun
+
+## Target evidence: `nacosogitech.com.ng` (cPanel shared hosting, 131.153.148.82)
+- Run 1 (04:47): 438 URLs / 335 targets, 26 native [3,11,12], 3 fake SSTI CONFIRMED, 318 confirmed dirs.
+- Run 2 (10:01, after P0 batch): 186 URLs / 3 hosts / 34 base, 109 native [1,19,89], SSTI correctly inconclusive, 16 confirmed dirs, 149 distinct 403 report-only, LDAP x3 + Open Redirect x1 new confirms under audit.
+
+## Files changed (uncommitted, `git status` 2026-10-09)
+- `athena.py` — enumeration per-port keys, admin dedupe+display 15, dalfox collapse, external-tools collapse, stealth=balanced|stealth, nuclei rate by profile (balanced 150/stealth 50), bruteforce WAF-blind message.
+- `modules/discovery.py` — wildcard baseline (now 3-probe dual + block heuristic), 403 filtered not confirmed, strict dir-listing + strict env, SPA tech gated, tech normalize, second-pass 14/14, crawl WAF warn, admin/security batched (20/10), batch 50 on high-thread profiles.
+- `modules/vulnerability_scanner.py` — removed weak XSS SSTI `'49' in page`, SSRF differential, strict dir-listing (strong title, 200, per-host once, cap 3), strict open-redirect (3xx+evil netloc+baseline), fuzz concurrent, batch 80 on threads>=40.
+- `modules/exploitation.py` — strict differential SSTI (7*7 vs 7*8, baseline clean, not-echoed), strict LDAP (baseline+markers/size-jump), strict open-redirect (3xx+baseline differs).
+- `modules/ai_integration.py` — attack_path/next_steps grounded (no privesc/lateral without shell), triage batch 40x5, failure-log collapse after 2.
+- `modules/tool_bridge.py` — httpx PATH-shadow message clarified.
+- Untouched/ignored: `requirements.txt` restored after tree showed encrypted blob (not ours); `New Text Document.txt` pre-existing mod; `fullscan.txt` untracked log.
+
+## Verification done (no live rescan in fix session)
+- `py_compile` OK all 6 files; `tests/test_config.py` 41 passed; `--list-stages`/`--list-tools` OK.
+- Unit probes: static-49 page -> SSTI 0 + exploit None; same-page SSRF -> 0; admin dedupe 3->2; enum keys per-port; tech normalize 4->2.
+- Pre-existing suite failures are infra (`pytest-asyncio` mode, async tests warn without plugin) — not from these edits.
+
+## Resume steps
+1. `python athena.py -t nacosogitech.com.ng` — expect wildcard filtered >0, Possible DirListing ~0, LDAP/redirect inconclusive unless differential, faster discovery/nuclei on balanced.
+2. Then: `git add athena.py modules/discovery.py modules/vulnerability_scanner.py modules/exploitation.py modules/ai_integration.py modules/tool_bridge.py` + commit (leave `.env`, `fullscan.txt`, reports untracked).
+3. Open risks: uniform-403 clustering heuristic, dir-listing host cap, LDAP/redirect need live negative test, AI 429 backoff still best-effort, perf still host-latency bound.

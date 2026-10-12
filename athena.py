@@ -307,11 +307,16 @@ def resolve_targets(args) -> List[str]:
 
 
 def parse_ports(port_str: str) -> List[int]:
-    if not port_str or port_str == 'top100':
-        return []
-    if port_str == 'top1000':
+    # IMPORTANT-ONLY is the default (empty list = discovery's curated set).
+    # --ports all sets the full-sweep flag consumed by discovery.scan_ports.
+    if not port_str or port_str == 'top100' or port_str == 'top1000':
         return []
     if port_str == 'all':
+        try:
+            import os as _os
+            _os.environ['ATHENA_FULL_PORTS'] = '1'
+        except Exception:
+            pass
         return []
     if '-' in port_str:
         parts = port_str.split('-')
@@ -355,6 +360,49 @@ async def run_discovery(target: str, output_format: str = 'html',
         emails = await discovery.harvest_emails(target, urls)
         if emails:
             results['emails'] = emails
+            print(f"  [+] Emails harvested: {len(emails)}")
+            for e in emails[:5]:
+                try:
+                    print(f"      - {e.get('email')} (from {e.get('source','')[:60]})")
+                except Exception:
+                    pass
+        else:
+            print(f"  [*] Emails: none found in first {min(len(urls),30)} pages")
+        # Always surface DNS/TLS/hidden-asset summaries (were silent 0.2s/0.5s/31s)
+        try:
+            _dns = results.get('dns_records') or {}
+            if _dns:
+                _ip = _dns.get('ip') or (', '.join(_dns.get('a_records', [])[:2]) if _dns.get('a_records') else 'n/a')
+                print(f"  [+] DNS: {_dns.get('domain','')} -> {_ip} | MX:{len(_dns.get('mx_records',[]))} "
+                      f"TXT:{len(_dns.get('txt_records',[]))} NS:{len(_dns.get('ns_records',[]))}")
+                if _dns.get('spf_analysis'):
+                    print(f"      SPF: {_dns.get('spf_analysis')}")
+                if _dns.get('dmarc_analysis'):
+                    print(f"      DMARC: {_dns.get('dmarc_analysis')}")
+            _tls = results.get('tls_certificate') or {}
+            if _tls:
+                if _tls.get('issues'):
+                    for iss in _tls['issues'][:3]:
+                        print(f"  [!] TLS: {iss}")
+                else:
+                    print(f"  [+] TLS: {_tls.get('version','?')} cipher={_tls.get('cipher','?')} "
+                          f"expiry={_tls.get('valid_until','?')}")
+            _ha = results.get('hidden_assets') or {}
+            if _ha:
+                print(f"  [+] Hidden assets: {len(_ha.get('hidden_directories',[]))} dirs, "
+                      f"{len(_ha.get('backup_files',[]))} backups, "
+                      f"{len(_ha.get('sensitive_files',[]))} sensitive")
+            elif stages is None or 'hidden_assets' in (stages or []):
+                print(f"  [*] Hidden assets: none confirmed (see wildcard-filtered counts above)")
+            _lh = results.get('listing_harvest') or {}
+            if _lh.get('findings'):
+                print(f"  [+] Listing harvest: {len(_lh['findings'])} file(s) "
+                      f"content-confirmed from {len(_lh.get('listings', []))} open "
+                      f"listing(s) ({_lh.get('files_seen', 0)} files seen)")
+            _sec = results.get('security_endpoints') or []
+            print(f"  [+] Security endpoints: {len(_sec)} reachable (robots/security.txt/sitemap)")
+        except Exception:
+            pass
         if scan_types:
             print(f"  [+] Advanced port scanning ({', '.join(scan_types)})...")
             adv_ports = ports or None
@@ -363,6 +411,15 @@ async def run_discovery(target: str, output_format: str = 'html',
                 concurrent=concurrent, rate_limit=rate, jitter=jitter/1000.0
             )
             results['advanced_ports'] = adv_results
+            # Reconcile basic vs advanced counts explicitly (was 12 vs 10 confusion)
+            try:
+                _basic = results.get('ports') or []
+                _adv_ports = (adv_results.get('ports') or {}) if isinstance(adv_results, dict) else {}
+                _adv_open = sum(1 for v in _adv_ports.values() if any(x.get('open') for x in v.values())) if _adv_ports else 0
+                print(f"  [*] Port reconciliation: basic={len(_basic) if isinstance(_basic,list) else _basic} "
+                      f"advanced_tcp={_adv_open} (UDP-only 53 explains deltas; trust union)")
+            except Exception:
+                pass
         return results
     finally:
         await discovery.close()
@@ -458,6 +515,65 @@ def _discovery_health(discovery_results: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def run_waf_gate(target: str, args=None) -> Dict[str, Any]:
+    """WAF detection FIRST — before discovery, scanning or bruteforce.
+
+    Runs the native detector (no binary needed) and, when installed,
+    wafw00f for a richer fingerprint. Returns a dict stored on
+    ``discovery_results['waf']`` and passed to the vuln scanner so rates
+    and payloads are tuned before a single injection is sent.
+    Never raises — a failed gate means 'unknown', never a crash.
+    """
+    print(f"\n{'='*60}")
+    print(f"  PHASE 0: WAF GATE (runs first)")
+    print(f"{'='*60}\n")
+    waf_info: Dict[str, Any] = {'verdict': 'unknown', 'waf': '', 'tuning': ''}
+    try:
+        from modules.waf_detector import detect_waf, waf_notice
+        waf_info = await detect_waf(target)
+        print(waf_notice(waf_info))
+    except Exception as exc:
+        print(f"  [!] Native WAF gate failed: {exc}")
+        waf_info = {'verdict': 'unknown', 'waf': '', 'tuning': str(exc)[:200]}
+    # wafw00f enrichment when installed (tuning signal, not a vuln)
+    try:
+        if args is None or not getattr(args, 'no_wafw00f', False):
+            from modules.tool_bridge import run_wafw00f, wafw00f_notice
+            summary = await run_wafw00f(target, enabled=True)
+            notice = wafw00f_notice(summary)
+            if notice:
+                print(notice)
+            if isinstance(summary, dict) and summary.get('status') == 'executed':
+                waf_info['wafw00f'] = summary
+                if summary.get('waf_detected') and waf_info.get('verdict') == 'none':
+                    waf_info['verdict'] = 'likely'
+                    waf_info['waf'] = summary.get('waf', 'WAF (wafw00f)')
+                    waf_info['tuning'] = ('wafw00f fingerprinted a WAF — '
+                                          'low-rate + bypass payloads apply.')
+                    print(f"  [!] WAF gate upgraded to LIKELY via wafw00f: {waf_info['waf']}")
+    except Exception as exc:
+        print(f"  [*] wafw00f enrichment skipped: {exc}")
+    # Tune global scan behaviour up-front
+    try:
+        verdict = str(waf_info.get('verdict', ''))
+        if verdict in ('confirmed', 'likely', 'hard-block'):
+            from modules.framework_config import FrameworkConfig as _FC
+            # Force stealth delays + lower concurrency while WAF is up
+            _FC.STEALTH_MODE = True
+            _FC.STEALTH_MIN_DELAY = max(float(getattr(_FC, 'STEALTH_MIN_DELAY', 0.1)), 0.4)
+            _FC.STEALTH_MAX_DELAY = max(float(getattr(_FC, 'STEALTH_MAX_DELAY', 0.5)), 1.5)
+            try:
+                _FC.SCANNING_THREADS = min(int(getattr(_FC, 'SCANNING_THREADS', 40)), 20)
+            except Exception:
+                pass
+            print(f"  [*] Scan tuned for WAF: stealth ON, delays "
+                  f"{_FC.STEALTH_MIN_DELAY}-{_FC.STEALTH_MAX_DELAY}s, "
+                  f"threads<={getattr(_FC, 'SCANNING_THREADS', 20)}")
+    except Exception:
+        pass
+    return waf_info
+
+
 async def show_tool_status() -> None:
     """Print the external tools Athena can call, then return."""
     try:
@@ -513,15 +629,20 @@ def _phase(label: str):
 
 
 async def run_vuln_scan(target: str, urls: List[str] = None,
-                         stealth: bool = False) -> List[Dict[str, Any]]:
+                         stealth: bool = False,
+                         waf_info: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     print(f"\n{'='*60}")
     print(f"  PHASE 2: VULNERABILITY SCANNING")
     print(f"{'='*60}\n")
+    if waf_info and str(waf_info.get('verdict', '')) in ('confirmed', 'likely', 'hard-block'):
+        print(f"  [*] Vuln scan WAF-aware: {waf_info.get('waf','WAF')} "
+              f"({waf_info.get('verdict')}) — bypass payloads + low rate")
+        stealth = True
     if not urls:
         if not target.startswith(('http://', 'https://')):
             target = f"https://{target}"
         urls = [target.rstrip('/') + '/']
-    scanner = VulnerabilityScanner(stealth_mode=stealth)
+    scanner = VulnerabilityScanner(stealth_mode=stealth, waf_info=waf_info)
     try:
         results = await scanner.scan_all(urls)
         return results
@@ -551,9 +672,22 @@ async def run_external_scan(target: str, stealth: bool = False,
         print(f"  [!] Tool bridge unavailable: {exc}")
         return None
     try:
+        # Profile-aware nuclei rate: stealth=50 (quiet), balanced=150,
+        # aggressive=None(default 150+). Old code used 50 for balanced too
+        # (since balanced stealth=True) -> 350s blew up to 796s.
+        try:
+            _prof2 = (getattr(args, 'profile', None) or os.getenv('AETHELRED_PROFILE', 'balanced')).lower()
+        except Exception:
+            _prof2 = 'balanced'
+        if _prof2 == 'stealth':
+            _nrate = 50
+        elif _prof2 == 'balanced':
+            _nrate = 150
+        else:
+            _nrate = None
         summary = await run_nuclei(
             target,
-            rate_limit=50 if stealth else None,
+            rate_limit=_nrate,
             enabled=not getattr(args, 'no_nuclei', False),
         )
     except Exception as exc:  # pragma: no cover - never break the scan
@@ -680,7 +814,16 @@ async def run_extended_tools(target: str,
     ordered: List[Dict[str, Any]] = []
     if sqlmap_summary:
         ordered.append(sqlmap_summary)
-    ordered.extend(dalfox_list or [])
+    # Collapse repeated dalfox unavailable/disabled into ONE record for
+    # console + report (was printing 10x identical lines, one per URL).
+    if dalfox_list:
+        _statuses = {str(s.get('status', '')) for s in dalfox_list}
+        if _statuses <= {'unavailable', 'disabled', 'skipped'}:
+            ordered.append(dalfox_list[0])
+        else:
+            # Keep executed/failed runs (they carry per-URL evidence)
+            ordered.extend([s for s in dalfox_list if str(s.get('status')) not in ('unavailable', 'disabled', 'skipped')]
+                           or dalfox_list[:1])
     if waf_summary:
         ordered.append(waf_summary)
     if httpx_summary:
@@ -699,7 +842,8 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
     print(f"\n{'='*60}")
     print(f"  PHASE 3: BRUTEFORCING & AUTH TESTING")
     print(f"{'='*60}\n")
-    results: Dict[str, Any] = {'web_logins': [], 'service_creds': [], 'default_creds': [], 'admin_panels': []}
+    results: Dict[str, Any] = {'web_logins': [], 'service_creds': [], 'default_creds': [],
+                               'admin_panels': [], 'spray_lockouts': []}
     login_forms = (discovery_results or {}).get('login_forms', [])
     admin_panels = (discovery_results or {}).get('admin_panels', [])
     ports = (discovery_results or {}).get('ports', [])
@@ -719,11 +863,29 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
             print(f"      {i}. [{source}] {form['url']}")
     
     if admin_panels:
-        print(f"  [*] Discovered {len(admin_panels)} admin panels:")
+        # Dedupe: normalize trailing slash + case so /webmail, /webmail/,
+        # /wp-login.php x2 don't count as 3 findings.
+        _seen = set()
+        _deduped = []
+        for p in admin_panels or []:
+            try:
+                _u = str(p.get('url', '')).rstrip('/').lower()
+                if not _u or _u in _seen:
+                    continue
+                _seen.add(_u)
+                _deduped.append(p)
+            except Exception:
+                continue
+        if len(_deduped) != len(admin_panels):
+            print(f"  [*] Deduplicated admin panels: {len(admin_panels)} -> {len(_deduped)} unique")
+        admin_panels = _deduped
+        print(f"  [*] Discovered {len(admin_panels)} unique admin panels:")
         results['admin_panels'] = admin_panels
-        for panel in admin_panels[:10]:  # Show top 10
+        for panel in admin_panels[:15]:
             panel_type = panel.get('panel_type', 'UNKNOWN')
             print(f"      - [{panel_type}] {panel['url']} (HTTP {panel['status']})")
+        if len(admin_panels) > 15:
+            print(f"      ... and {len(admin_panels)-15} more (see HTML report)")
     
     # Combine: admin panels first, then filtered regular forms
     all_forms = admin_login_forms + filtered_forms
@@ -747,12 +909,25 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
         
         bf = BruteforceModule()
         try:
-            # Use intelligent bruteforce for admin panels, regular for others
+            # Admin panels (cPanel/Webmail/WHM) get the anti-lockout spray:
+            # sequential attempts, 4-9s gaps, lockout abort, session-verified
+            # success. Fast parallel hammering only earns an IP ban.
             if admin_login_forms:
-                print(f"\n  [*] Phase 3a: Intelligent bruteforce on admin panels...")
-                creds = await bf.intelligent_bruteforce(admin_login_forms)
-                results['web_logins'].extend(creds)
-            
+                print(f"\n  [*] Phase 3a: Slow credential spray on admin panels "
+                      f"(anti-lockout: sequential, 4-9s gaps, session-verified hits)...")
+                spray = await bf.slow_spray(admin_login_forms)
+                results['web_logins'].extend(spray.get('credentials', []))
+                results['spray_lockouts'] = spray.get('lockouts', [])
+                _st = spray.get('stats', {})
+                _ncreds = len(spray.get('credentials', []))
+                _nlock = len(spray.get('lockouts', []))
+                print(f"  [*] Spray summary: {_st.get('attempts', 0)} attempt(s), "
+                      f"{_st.get('forms', 0)} form(s), {_ncreds} verified success(es), "
+                      f"{_nlock} lockout(s)")
+                if _nlock:
+                    print(f"  [!] Panel lockout active — remaining guesses must wait "
+                          f"for the block to lift (manual retry, do not re-spray)")
+
             if filtered_forms:
                 print(f"\n  [*] Phase 3b: Standard bruteforce on regular login forms...")
                 creds = await bf.bruteforce_login_forms(filtered_forms)
@@ -760,22 +935,62 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
         finally:
             await bf.close()
     else:
-        print(f"  [*] No login forms to bruteforce (filtered out registration/signup forms)")
+        # Distinguish "0 forms found (WAF-blind)" from "forms filtered".
+        # Old message claimed registration-filtering when there was nothing.
+        if not login_forms:
+            print(f"  [*] No login forms captured (crawler WAF-blocked on 403; "
+                  f"see [!] WAF warning above). High-value panels above remain manual targets - "
+                  f"no automated credential attempts made (safe-mode, no false bruteforce).")
+        else:
+            print(f"  [*] No login forms to bruteforce after filtering registration/signup/forgot forms "
+                  f"({len(login_forms)} raw forms seen, {len(filtered_forms)} after filter)")
 
     host = target.replace('https://', '').replace('http://', '').split('/')[0].split(':')[0]
+    # TLS-aware + anonymous-first service testing on every important open port.
+    # Plain bruteforce without TLS fails on modern mail servers (they refuse
+    # AUTH over cleartext) — the SMTP/POP3/IMAP bruteforcers upgrade via
+    # STARTTLS or wrap implicit-TLS ports. Anonymous/open access (FTP anon,
+    # SMB guest, SMTP open relay, Redis NOAUTH, SNMP public) is probed FIRST
+    # because it needs no guessing and is the real-world win.
     service_bf = ServiceBruteforcer()
     port_service_map = {
-        21: 'ftp', 22: 'ssh', 3306: 'mysql', 5432: 'postgresql',
-        1433: 'mssql', 6379: 'redis', 23: 'telnet',
+        21: 'ftp', 22: 'ssh', 23: 'telnet',
+        25: 'smtp', 587: 'smtp', 465: 'smtp',
+        110: 'pop3', 995: 'pop3', 143: 'imap', 993: 'imap',
+        445: 'smb', 139: 'smb', 161: 'snmp',
+        3306: 'mysql', 5432: 'postgresql', 1433: 'mssql', 6379: 'redis',
     }
+    anon_services = {'ftp', 'smb', 'smtp', 'redis', 'snmp'}
+    results['anonymous_findings'] = []
     for port, service in port_service_map.items():
         if port in ports:
-            print(f"  [*] Checking default credentials on {service}://{host}:{port}")
-            creds = await service_bf.bruteforce_service(host, port, service, ['root', 'admin'], ['root', 'admin'])
+            # 1. Anonymous / open access first (no guessing)
+            if service in anon_services:
+                try:
+                    anon = await service_bf.check_anonymous(host, port, service)
+                    if anon.get('anonymous'):
+                        print(f"    [+] ANONYMOUS {service.upper()} on {host}:{port} — {anon.get('detail')}")
+                        results['anonymous_findings'].append(anon)
+                    else:
+                        print(f"  [*] {service.upper()} {host}:{port}: {anon.get('detail','no anon access')}")
+                except Exception as exc:
+                    print(f"  [*] {service.upper()} anon check skipped on {port}: {exc}")
+            # 2. TLS-aware default-credential test (STARTTLS/implicit-TLS inside)
+            transport = ''
+            if service in ('smtp', 'pop3', 'imap'):
+                transport = ' (TLS-aware: STARTTLS/implicit-TLS)'
+            print(f"  [*] Checking default credentials on {service}://{host}:{port}{transport}")
+            try:
+                creds = await service_bf.bruteforce_service(host, port, service, ['root', 'admin'], ['root', 'admin'])
+            except Exception as exc:
+                print(f"    [-] {service} bruteforce error on {port}: {exc}")
+                continue
             results['service_creds'].extend(creds)
             for c in creds:
                 if c.success:
-                    print(f"    [+] Default credentials found: {c.username}:{c.password} on {service}")
+                    print(f"    [+] Default credentials found: {c.username}:{c.password} on {service} ({host}:{port})")
+    if not any(p in ports for p in port_service_map):
+        print(f"  [*] No bruteforceable services among open ports {sorted(ports)[:20]} — web-form phase above is authoritative")
 
     return results
 
@@ -792,36 +1007,46 @@ async def run_enumeration(target: str, ports: List[int] = None) -> Dict[str, Any
     if ports:
         for port in ports:
             service = port_map.get(port)
+            # Key per host:port so 25/465/587 don't overwrite each other
+            # (bug: last SMTP port wiped earlier results, report showed No).
+            key = f"{service}_{port}" if service in ('smtp', 'pop3', 'imap') else (service or f"port_{port}")
             if service == 'smb':
                 print(f"  [*] SMB enumeration on {host}:{port}")
                 smb = SMBEnumerator()
-                results['smb'] = await smb.enumerate(host, port)
-                if results['smb'].get('accessible'):
-                    print(f"    [+] SMB accessible: {results['smb'].get('os_version', 'unknown')}")
+                results[key] = await smb.enumerate(host, port)
+                if results[key].get('accessible'):
+                    print(f"    [+] SMB accessible: {results[key].get('os_version', 'unknown')}")
             elif service == 'snmp':
                 print(f"  [*] SNMP enumeration on {host}:{port}")
                 snmp = SNMPEnumerator()
-                results['snmp'] = await snmp.enumerate(host, port)
-                if results['snmp'].get('accessible'):
-                    print(f"    [+] SNMP accessible, community: {results['snmp'].get('community', 'N/A')}")
+                results[key] = await snmp.enumerate(host, port)
+                if results[key].get('accessible'):
+                    print(f"    [+] SNMP accessible, community: {results[key].get('community', 'N/A')}")
             elif service == 'smtp':
                 print(f"  [*] SMTP enumeration on {host}:{port}")
                 smtp = SMTPEnumerator()
-                results['smtp'] = await smtp.enumerate(host, port)
-                if results['smtp'].get('accessible'):
-                    print(f"    [+] SMTP accessible ({results['smtp'].get('transport', 'plain')}): {results['smtp'].get('banner', '')[:60]}")
+                results[key] = await smtp.enumerate(host, port)
+                if results[key].get('accessible'):
+                    print(f"    [+] SMTP accessible ({results[key].get('transport', 'plain')}): {results[key].get('banner', '')[:60]}")
+                # Back-compat alias: keep 'smtp' pointing at first accessible one
+                if results[key].get('accessible') and not results.get('smtp', {}).get('accessible'):
+                    results['smtp'] = results[key]
             elif service == 'pop3':
                 print(f"  [*] POP3 enumeration on {host}:{port}")
                 pop3 = POP3Enumerator()
-                results['pop3'] = await pop3.enumerate(host, port)
-                if results['pop3'].get('accessible'):
-                    print(f"    [+] POP3 accessible: {results['pop3'].get('banner', '')[:60]}")
+                results[key] = await pop3.enumerate(host, port)
+                if results[key].get('accessible'):
+                    print(f"    [+] POP3 accessible: {results[key].get('banner', '')[:60]}")
+                if results[key].get('accessible') and not results.get('pop3', {}).get('accessible'):
+                    results['pop3'] = results[key]
             elif service == 'imap':
                 print(f"  [*] IMAP enumeration on {host}:{port}")
                 imap = IMAPEnumerator()
-                results['imap'] = await imap.enumerate(host, port)
-                if results['imap'].get('accessible'):
-                    print(f"    [+] IMAP accessible: {results['imap'].get('banner', '')[:60]}")
+                results[key] = await imap.enumerate(host, port)
+                if results[key].get('accessible'):
+                    print(f"    [+] IMAP accessible: {results[key].get('banner', '')[:60]}")
+                if results[key].get('accessible') and not results.get('imap', {}).get('accessible'):
+                    results['imap'] = results[key]
 
     return results
 
@@ -830,14 +1055,70 @@ async def run_cve_mapping(technologies: List[Dict[str, Any]]) -> List[VersionCVE
     print(f"\n{'='*60}")
     print(f"  PHASE: CVE MAPPING")
     print(f"{'='*60}\n")
+    if not technologies:
+        print(f"  [*] CVE mapping: no versioned technologies to map (tech detection empty)")
+        return []
+    try:
+        _names = ', '.join([f"{t.get('technology','?')} {t.get('version','')}".strip() for t in technologies[:8]])
+        print(f"  [*] Mapping {len(technologies)} technologies: {_names}")
+    except Exception:
+        pass
+    print(f"  [*] Live NVD lookup: CPE match first, keyword fallback "
+          f"(rate-limited 5 req/30s; set NVD_API_KEY for 50/30s)")
     mapper = CVEMapper()
     results = await mapper.map_versions(technologies)
+    _with = sum(1 for r in results if r.cves)
     for r in results:
         if r.cves:
             print(f"  [+] {r.technology} {r.version}: {len(r.cves)} CVEs (max CVSS: {r.max_cvss})")
             for cve in r.cves[:3]:
                 print(f"      - {cve.cve_id}: {cve.description[:80]}...")
+    if not results:
+        print(f"  [*] CVE mapping: no versioned technologies detected "
+              f"(banner strings without versions cannot be mapped reliably)")
+    elif not _with:
+        print(f"  [*] CVE mapping: 0 CVEs for {len(results)} versioned technology(ies) "
+              f"(live NVD queried; a clean result means no published matches, "
+              f"not 'DB too small')")
+    else:
+        print(f"  [+] CVE mapping: {_with}/{len(results)} technologies matched, "
+              f"{sum(len(r.cves) for r in results)} total candidate CVEs (live NVD + curated)")
     return results
+
+
+def _service_banner_techs(enumeration: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Versions that only exist in service banners (Exim, Dovecot, OpenSSH).
+
+    The web crawler never sees SMTP/POP3/IMAP banners, so versioned mail
+    servers were invisible to CVE mapping (Exim 4.100.1 on the last scan
+    mapped nothing).  Banner versions feed the same NVD lookup.
+    """
+    patterns = [
+        (r'ESMTP\s+Exim\s+(\d+(?:\.\d+)+)', 'Exim'),
+        (r'\bExim\s+(\d+(?:\.\d+)+)', 'Exim'),
+        (r'Dovecot[ /\-]v?(\d+(?:\.\d+)+)', 'Dovecot'),
+        (r'OpenSSH[_\s]v?(\d+(?:\.\d+p?\d+))', 'OpenSSH'),
+        (r'Postfix\s*[-\s]v?(\d+(?:\.\d+)+)', 'Postfix'),
+        (r'\bApache/(\d+(?:\.\d+)+)', 'Apache'),
+        (r'\bnginx/(\d+(?:\.\d+)+)', 'nginx'),
+    ]
+    techs: List[Dict[str, Any]] = []
+    seen = set()
+    for data in (enumeration or {}).values():
+        if not isinstance(data, dict) or not data.get('accessible'):
+            continue
+        banner = str(data.get('banner', ''))
+        if not banner:
+            continue
+        for rx, product in patterns:
+            m = re.search(rx, banner, re.IGNORECASE)
+            if m and product.lower() not in seen:
+                seen.add(product.lower())
+                techs.append({'technology': product,
+                              'version': m.group(1),
+                              'confidence': 4,
+                              'source': 'service_banner'})
+    return techs
 
 
 def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: List[Dict[str, Any]],
@@ -860,6 +1141,22 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
     if ai_analysis:
         report_data['ai_analysis'] = ai_analysis
     if external_tools:
+        # Collapse duplicate unavailable tool records (dalfox x10) so the
+        # HTML table shows one row per tool-status, not one per probed URL.
+        try:
+            _seen_tool = set()
+            _collapsed = []
+            for s in external_tools:
+                if not isinstance(s, dict):
+                    continue
+                _k = (str(s.get('tool', '')), str(s.get('status', '')))
+                if _k[1] in ('unavailable', 'disabled', 'skipped') and _k in _seen_tool:
+                    continue
+                _seen_tool.add(_k)
+                _collapsed.append(s)
+            external_tools = _collapsed
+        except Exception:
+            pass
         report_data['external_tools'] = external_tools
     if bruteforce:
         report_data['bruteforce'] = bruteforce
@@ -934,55 +1231,77 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     high_count = sev.get('high', 0)
     medium_count = sev.get('medium', 0)
 
+    # Expanded vulnerability cards: broad description, proof, remediation.
+    # Inconclusive runner results are grouped into a single note per type —
+    # never full rows (they are "not sure", not findings).
     vuln_rows = ''
+    inconclusive_note_total = 0
     for vtype, vinfo in vulns.items():
         s = vinfo.get('severity', 'UNKNOWN')
         color = {'CRITICAL': '#ff4444', 'HIGH': '#ff8800', 'MEDIUM': '#ffbb33', 'LOW': '#ffdd55'}.get(s, '#999')
-        assets = ', '.join(vinfo.get('assets_affected', [])[:3])
-        techniques = ''.join(f"<li>{t}</li>" for t in vinfo.get('attack_techniques', []))
-        tools = ', '.join(vinfo.get('tools', []))
-        gains = vinfo.get('attacker_gains', '')
-        
-        # Per-URL detection table.  A row is only called confirmed when the
-        # exploitation runner proved it; everything else is an observation.
-        confirmed_findings = vinfo.get('confirmed_findings', [])
+        assets = '<br>'.join(f"<code>{html.escape(str(a))}</code>" for a in vinfo.get('assets_affected', [])[:5])
+        techniques = ''.join(f"<li>{html.escape(str(t))}</li>" for t in vinfo.get('attack_techniques', []))
+        tools = html.escape(', '.join(vinfo.get('tools', [])))
+        gains = html.escape(str(vinfo.get('attacker_gains', '')))
+        desc_full = html.escape(str(vinfo.get('description', '')))
+        remediation = html.escape(str(vinfo.get('remediation', '')))
+        timeline = html.escape(str(vinfo.get('timeline', 'Scheduled')))
+        vcount = int(vinfo.get('verified_count', 0) or 0)
+
+        confirmed_findings = vinfo.get('confirmed_findings', []) or []
+        # Split proven vs unverified vs inconclusive
+        proven = [f for f in confirmed_findings if f.get('verified')]
+        inconc = [f for f in confirmed_findings if str(f.get('verification_status', '')).lower() == 'inconclusive']
+        unver = [f for f in confirmed_findings if not f.get('verified') and str(f.get('verification_status', '')).lower() != 'inconclusive']
+        inconclusive_note_total += len(inconc)
+
+        def _row(f, badge, badge_color):
+            return (f"<tr><td><span class=\"sev-badge\" style=\"background:{badge_color}\">{badge}</span></td>"
+                    f"<td><code>{html.escape(str(f.get('url', '')))}</code></td>"
+                    f"<td><code>{html.escape(str(f.get('payload', ''))[:300])}</code></td>"
+                    f"<td>{html.escape(str(f.get('description', ''))[:600])}"
+                    + (f"<br><em>Evidence: {html.escape(str(f.get('evidence', ''))[:300])}</em>" if f.get('evidence') else '')
+                    + (f"<br><span class=\"conf\">confidence: {html.escape(str(f.get('confidence', '')))}</span>" if f.get('confidence') else '')
+                    + "</td></tr>")
+
         findings_html = ''
-        if confirmed_findings:
-            any_verified = any(f.get('verified') for f in confirmed_findings)
-            label = ('Detection Details (confirmed rows marked)'
-                     if any_verified else 'Observations (scanner detections, '
-                                          'not actively proven)')
-            findings_html = ('<div class="confirmed-findings">'
-                             f'<strong>{label}:</strong>'
-                             '<table class="findings-table">')
-            findings_html += '<tr><th>Status</th><th>URL</th><th>Payload</th><th>Response</th></tr>'
-            for finding in confirmed_findings[:10]:  # Limit to 10
-                is_verified = bool(finding.get('verified'))
-                status_html = ('<span style="color:#66bb6a;font-weight:bold;">'
-                               'CONFIRMED</span>' if is_verified else
-                               '<span style="color:#888;">observed</span>')
-                url = finding.get('url', '')
-                payload = finding.get('payload', '')
-                desc = finding.get('description', '')
-                findings_html += (f'<tr><td>{status_html}</td>'
-                                  f'<td><code>{url}</code></td>'
-                                  f'<td><code>{payload}</code></td>'
-                                  f'<td>{desc}</td></tr>')
+        if proven:
+            findings_html += ('<div class="confirmed-findings proven"><strong>'
+                              f'Confirmed proof ({len(proven)}): double-probed, differential evidence — trusted.</strong>'
+                              '<table class="findings-table">'
+                              '<tr><th>Status</th><th>Affected URL</th><th>Payload / proof</th><th>What was proven + evidence</th></tr>')
+            for f in proven[:10]:
+                findings_html += _row(f, 'CONFIRMED', '#2e7d32')
             findings_html += '</table></div>'
-        
+        if unver:
+            findings_html += ('<div class="confirmed-findings unverified"><strong>'
+                              f'Unverified observations ({len(unver)}): scanner detection, needs manual re-test — treat as leads, not breaches.</strong>'
+                              '<table class="findings-table">'
+                              '<tr><th>Status</th><th>Affected URL</th><th>Payload</th><th>Why it is only a lead</th></tr>')
+            for f in unver[:8]:
+                findings_html += _row(f, 'UNVERIFIED', '#8a6d00')
+            findings_html += '</table></div>'
+        if inconc:
+            findings_html += (f'<div class="inconclusive-note">Inconclusive re-tests for this type: '
+                              f'<strong>{len(inconc)}</strong> — the exploitation runner could not reproduce them '
+                              f'(no proof). They are <strong>not listed as findings</strong>; re-test manually before acting.</div>')
+
         vuln_rows += f"""
-        <tr>
-            <td><span class="sev-badge" style="background:{color}">{s}</span></td>
-            <td>{vtype}</td>
-            <td>{assets}</td>
-            <td>{vinfo.get('description', '')}
+        <tr class="vuln-card">
+            <td><span class="sev-badge" style="background:{color}">{html.escape(str(s))}</span><br>
+                <span class="conf">proven: {vcount}</span></td>
+            <td><strong>{html.escape(str(vtype))}</strong></td>
+            <td class="assets">{assets or '<em>—</em>'}</td>
+            <td class="desc"><p class="desc-text">{desc_full}</p>
                 {findings_html}
-                <details class="attack-details">
-                    <summary>How an attacker compromises this</summary>
+                <details class="attack-details" open>
+                    <summary>How an attacker compromises this (step-by-step)</summary>
                     <ol class="attack-steps">{techniques}</ol>
                     <p><strong>Attacker gains:</strong> {gains}</p>
-                    <p><strong>Tools:</strong> {tools}</p>
+                    <p><strong>Tools an attacker uses:</strong> {tools}</p>
                 </details>
+                <div class="remediation"><strong>Fix:</strong> {remediation}<br>
+                <em>Timeline: {timeline}</em></div>
             </td>
         </tr>"""
 
@@ -1021,21 +1340,128 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     if not recon_ran:
         tech_items = tech_items or '<em>Not scanned in this mode (run -m full or -m discovery)</em>'
 
+    # Dedupe admin panels for display (defense in depth; source already dedupes)
+    _admin_seen = set()
+    _admin_unique = []
+    for p in discovery_findings.get('admin_panels', []) or []:
+        try:
+            _k = str((p or {}).get('url', '')).rstrip('/').lower()
+            if not _k or _k in _admin_seen:
+                continue
+            _admin_seen.add(_k)
+            _admin_unique.append(p)
+        except Exception:
+            continue
     admin_items = ''.join(
         f"<li><strong>[{html.escape(str(p.get('panel_type', 'UNKNOWN')))}]</strong> "
         f"<code>{html.escape(str(p.get('url', '')))}</code> "
         f"(HTTP {html.escape(str(p.get('status', '')))})</li>"
-        for p in discovery_findings.get('admin_panels', [])[:50]
+        for p in _admin_unique[:50]
     )
     admin_section = (f"<h2>Admin Panels &amp; High-Value Targets</h2><ul>{admin_items}</ul>"
                      if admin_items else "")
+
+    # --- DNS & email hygiene (SPF/DMARC proven from live DNS lookups) ---
+    dns_data = discovery_findings.get('dns_records') or {}
+    tls_data = discovery_findings.get('tls_certificate') or {}
+    dns_section = ''
+    if dns_data or tls_data:
+        def _kv_row(label, value, danger=False):
+            color = ' style="color:#ff4444;font-weight:bold;"' if danger else ''
+            return (f"<tr><td><strong>{html.escape(str(label))}</strong></td>"
+                    f"<td{color}>{value}</td></tr>")
+        _rows = ''
+        if dns_data:
+            _dmarc = str(dns_data.get('dmarc_analysis')
+                         or ('DMARC record present' if dns_data.get('dmarc_record')
+                             else 'Not queried'))
+            _spf = str(dns_data.get('spf_analysis')
+                       or ('SPF record present' if dns_data.get('spf_record')
+                           else 'Not queried'))
+            _ip = str(dns_data.get('ip')
+                      or (', '.join(dns_data.get('a_records', [])[:3]) or 'n/a'))
+            _mx = dns_data.get('mx_records', []) or []
+            _mx_text = (', '.join(str(m.get('exchange', m)) for m in _mx[:4])
+                        if _mx else 'none (email receiving may be external)')
+            _rows += _kv_row('Domain', html.escape(str(dns_data.get('domain', ''))))
+            _rows += _kv_row('IP (A record)', html.escape(_ip))
+            _rows += _kv_row('Mail exchangers (MX)',
+                             html.escape(str(_mx_text)) if _mx else _mx_text,
+                             danger=not bool(_mx))
+            _rows += _kv_row('SPF', html.escape(_spf),
+                             danger='no spf' in _spf.lower() or 'missing' in _spf.lower())
+            _rows += _kv_row('DMARC', html.escape(_dmarc),
+                             danger=('no dmarc' in _dmarc.lower()
+                                     or 'missing' in _dmarc.lower()))
+        if tls_data:
+            _issues = tls_data.get('issues') or []
+            _tls_txt = (f"{tls_data.get('version', '?')} / "
+                        f"expires {tls_data.get('valid_until', '?')}")
+            if _issues:
+                _tls_txt += f" — {len(_issues)} issue(s): {html.escape(str(_issues[0]))[:150]}"
+            _rows += _kv_row('TLS certificate', html.escape(_tls_txt),
+                             danger=bool(_issues))
+        dns_section = f"""
+    <h2>DNS &amp; Email Security (live lookups)</h2>
+    <table><thead><tr><th>Check</th><th>Result</th></tr></thead>
+    <tbody>{_rows}</tbody></table>"""
+
+    # --- Confirmed exposed files: listing harvest + direct-probed backups ---
+    file_rows = ''
+    _lh = discovery_findings.get('listing_harvest') or {}
+    for f in (_lh.get('findings') or []):
+        file_rows += (
+            f"<tr><td><span class=\"sev-badge\" style=\"background:#2e7d32\">CONFIRMED</span></td>"
+            f"<td>Directory-listing harvest</td>"
+            f"<td><code>{html.escape(str(f.get('url', '')))}</code></td>"
+            f"<td>{html.escape(str(f.get('description', '')))}</td>"
+            f"<td><code>{html.escape(str(f.get('evidence', '')))}</code></td></tr>")
+    _ha = discovery_findings.get('hidden_assets') or {}
+    for b in (_ha.get('backup_files') or [])[:30]:
+        file_rows += (
+            f"<tr><td><span class=\"sev-badge\" style=\"background:#2e7d32\">CONFIRMED</span></td>"
+            f"<td>Backup direct-probe ({html.escape(str(b.get('backup_type', '')))})</td>"
+            f"<td><code>{html.escape(str(b.get('url', '')))}</code></td>"
+            f"<td>{html.escape(str(b.get('what_it_leaks', 'Backup file accessible')))}</td>"
+            f"<td><code>{html.escape(str(b.get('proof', '')))}</code></td></tr>")
+    exposed_section = ''
+    if file_rows:
+        exposed_section = f"""
+    <h2>Confirmed Exposed Files (direct fetch + content proof)</h2>
+    <p>Every row below was <strong>fetched and content-sniffed</strong> (archive
+    magic, SQL/PHP markers, KEY=VALUE config) — not guessed from a status code.</p>
+    <table><thead><tr><th>Status</th><th>Method</th><th>URL</th><th>What it is</th><th>Proof</th></tr></thead>
+    <tbody>{file_rows}</tbody></table>"""
+
+    # --- WAF gate section (Phase 0, runs first) ---
+    _waf = (audit.get('discovery_findings', {}) or {}).get('waf') or audit.get('waf') or {}
+    # discovery stores waf under discovery_results['waf']; surface it here
+    try:
+        _dw = (report.get('athena_security_audit', {}).get('discovery_findings', {}) or {}).get('waf')
+        if _dw and not _waf:
+            _waf = _dw
+    except Exception:
+        pass
+    waf_section = ''
+    if _waf and isinstance(_waf, dict) and _waf.get('verdict'):
+        _wv = html.escape(str(_waf.get('verdict', '')))
+        _wn = html.escape(str(_waf.get('waf', 'unknown') or 'unknown'))
+        _wt = html.escape(str(_waf.get('tuning', '')))
+        _wconf = html.escape(str(_waf.get('confidence', '')))
+        _wcolor = {'confirmed': '#ff4444', 'likely': '#ff8800', 'hard-block': '#ff8800', 'none': '#2e7d32'}.get(str(_waf.get('verdict', '')), '#888')
+        waf_section = f"""
+    <h2>WAF Gate (Phase 0 — ran first)</h2>
+    <table><thead><tr><th>Verdict</th><th>WAF</th><th>Confidence</th><th>Tuning applied</th></tr></thead>
+    <tbody><tr><td><span class="sev-badge" style="background:{_wcolor}">{_wv.upper()}</span></td>
+    <td>{_wn}</td><td>{_wconf}</td><td>{_wt}</td></tr></tbody></table>"""
 
     # --- Consolidated phase sections (credentials, services, CVEs, AI) ---
     bf = audit.get('bruteforce_findings', {}) or {}
     bf_section = ''
     web_creds = bf.get('successful_web_logins', [])
     svc_creds = bf.get('successful_service_logins', [])
-    if web_creds or svc_creds or bf.get('admin_panels'):
+    anon_acc = bf.get('anonymous_access', []) or []
+    if web_creds or svc_creds or anon_acc or bf.get('admin_panels') or bf.get('spray_lockouts'):
         rows = ''
         for cred in web_creds[:20]:
             rows += (f"<tr><td>Web form</td><td><code>{html.escape(str(cred.get('url', '')))}</code></td>"
@@ -1051,10 +1477,40 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
             f"<table><thead><tr><th>Service</th><th>Target</th>"
             f"<th>Username</th><th>Password</th></tr></thead><tbody>{rows}</tbody></table>"
         ) if rows else "<p><em>No valid credentials recovered.</em></p>"
+        anon_html = ''
+        if anon_acc:
+            anon_rows = ''.join(
+                f"<tr><td><span class=\"sev-badge\" style=\"background:#ff4444\">ANON</span></td>"
+                f"<td>{html.escape(str(a.get('service', '')))}</td>"
+                f"<td><code>{html.escape(str(a.get('host', '')))}:{html.escape(str(a.get('port', '')))}</code></td>"
+                f"<td>{html.escape(str(a.get('detail', '')))}</td></tr>"
+                for a in anon_acc[:20] if isinstance(a, dict))
+            anon_html = (f"<h3>Anonymous / open access (no guessing needed — highest priority)</h3>"
+                         f"<table><thead><tr><th>Result</th><th>Service</th><th>Target</th><th>Detail</th></tr></thead>"
+                         f"<tbody>{anon_rows}</tbody></table>")
+        else:
+            anon_html = ("<p><em>No anonymous/open service access found (FTP anon, SMB guest, SMTP open relay, "
+                         "Redis NOAUTH, SNMP public all probed with TLS awareness).</em></p>")
+        lockouts = bf.get('spray_lockouts', []) or []
+        lockout_html = ''
+        if lockouts:
+            lk_rows = ''.join(
+                f"<tr><td><span class=\"sev-badge\" style=\"background:#8a6d00\">LOCKOUT</span></td>"
+                f"<td><code>{html.escape(str(l.get('url', '')))}</code></td>"
+                f"<td>{html.escape(str(l.get('detail', '')))}</td></tr>"
+                for l in lockouts if isinstance(l, dict))
+            lockout_html = (f"<h3>Panel lockouts triggered (spray aborted - retry manually later)</h3>"
+                            f"<table><thead><tr><th>Result</th><th>Target</th><th>Detail</th></tr>"
+                            f"<tbody>{lk_rows}</tbody></table>")
         bf_section = f"""
     <h2>Authentication &amp; Credential Testing</h2>
-    <p>Login forms and services tested during the bruteforce phase. Any row below
-    is a confirmed credential.</p>
+    <p>Login forms tested plus TLS-aware service auth (SMTP/POP3/IMAP upgrade via STARTTLS or implicit TLS; "
+    "plain bruteforce without TLS fails on modern servers and is not attempted blindly). "
+    "Anonymous/open access is probed <strong>before</strong> guessing. Admin panels use a slow anti-lockout "
+    "spray (sequential, 4-9s gaps) where every hit is re-verified with a follow-up session check. "
+    "Any credential row below is a confirmed login.</p>
+    {anon_html}
+    {lockout_html}
     {cred_table}"""
 
     enum = audit.get('service_enumeration', {}) or {}
@@ -1236,8 +1692,8 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
 <title>Athena Security Audit - {audit.get('target', 'Unknown')}</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0a0a0f; color: #e0e0e0; line-height: 1.6; }}
-.container {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
+body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0a0a0f; color: #e0e0e0; line-height: 1.65; font-size: 15px; }}
+.container {{ max-width: 1400px; margin: 0 auto; padding: 24px; }}
 .header {{ background: linear-gradient(135deg, #1a1a2e, #16213e); padding: 40px; border-radius: 10px; margin-bottom: 30px; text-align: center; }}
 .header h1 {{ color: #00d2ff; font-size: 2em; }}
 .header .meta {{ color: #888; margin-top: 10px; }}
@@ -1268,12 +1724,26 @@ li {{ padding: 4px 0; }}
 li::before {{ content: "▸"; color: #00d2ff; margin-right: 8px; }}
 .chart {{ margin: 20px 0; height: 20px; border-radius: 10px; overflow: hidden; display: flex; }}
 .chart .segment {{ height: 100%; transition: width 0.5s; }}
-.confirmed-findings {{ margin: 10px 0; padding: 10px; background: #0d1117; border-radius: 6px; border: 1px solid #30363d; }}
-.findings-table {{ width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.85em; }}
-.findings-table th {{ background: #161b22; padding: 6px 8px; text-align: left; font-weight: 600; color: #58a6ff; border-bottom: 1px solid #30363d; }}
-.findings-table td {{ padding: 5px 8px; border-bottom: 1px solid #21262d; word-break: break-all; }}
+.confirmed-findings {{ margin: 12px 0; padding: 12px; background: #0d1117; border-radius: 8px; border: 1px solid #30363d; }}
+.confirmed-findings.proven {{ border-color: #2e7d32; }}
+.confirmed-findings.unverified {{ border-color: #8a6d00; }}
+.findings-table {{ width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.9em; table-layout: fixed; }}
+.findings-table th {{ background: #161b22; padding: 8px 10px; text-align: left; font-weight: 600; color: #58a6ff; border-bottom: 1px solid #30363d; }}
+.findings-table th:nth-child(1) {{ width: 110px; }} .findings-table th:nth-child(2) {{ width: 26%; }}
+.findings-table th:nth-child(3) {{ width: 26%; }} .findings-table th:nth-child(4) {{ width: auto; }}
+.findings-table td {{ padding: 8px 10px; border-bottom: 1px solid #21262d; word-break: break-word; vertical-align: top; line-height: 1.5; }}
 .findings-table tr:hover {{ background: #1c2128; }}
-.findings-table code {{ color: #79c0ff; font-size: 0.9em; background: #161b22; padding: 2px 4px; border-radius: 3px; }}
+.findings-table code {{ color: #79c0ff; font-size: 0.88em; background: #161b22; padding: 2px 5px; border-radius: 3px; word-break: break-all; }}
+.vuln-card td.desc {{ min-width: 0; }}
+.desc-text {{ font-size: 1.02em; line-height: 1.7; margin-bottom: 10px; color: #e8e8e8; }}
+.assets code {{ display: inline-block; margin: 2px 0; }}
+.conf {{ font-size: 0.8em; color: #9aa; }}
+.remediation {{ margin-top: 10px; padding: 10px 12px; background: #0f2a1c; border-left: 3px solid #2e7d32; border-radius: 6px; }}
+.inconclusive-note {{ margin-top: 8px; padding: 8px 10px; background: #1a1a2e; border: 1px dashed #555; border-radius: 6px; color: #aaa; font-size: 0.9em; }}
+table.vuln-main {{ table-layout: fixed; }}
+table.vuln-main th:nth-child(1) {{ width: 90px; }} table.vuln-main th:nth-child(2) {{ width: 170px; }}
+table.vuln-main th:nth-child(3) {{ width: 220px; }} table.vuln-main th:nth-child(4) {{ width: auto; }}
+table.vuln-main td {{ vertical-align: top; }}
 @media print {{ body {{ background: #fff; color: #000; }} .header {{ background: #eee; }} .card {{ background: #f5f5f5; }} th {{ background: #ddd; color: #000; }} .rec-item {{ background: #f5f5f5; border-left-color: #333; }} .confirmed-findings {{ background: #f0f0f0; border-color: #ccc; }} .findings-table th {{ background: #e0e0e0; color: #000; }} }}
 </style>
 </head>
@@ -1313,7 +1783,13 @@ li::before {{ content: "▸"; color: #00d2ff; margin-right: 8px; }}
         </tbody>
     </table>
 
+    {waf_section}
+
     {admin_section}
+
+    {dns_section}
+
+    {exposed_section}
 
     {bf_section}
 
@@ -1324,8 +1800,12 @@ li::before {{ content: "▸"; color: #00d2ff; margin-right: 8px; }}
     {tool_section}
 
     <h2>Vulnerability Details</h2>
-    <table>
-        <thead><tr><th>Severity</th><th>Type</th><th>Affected</th><th>Description</th></tr>
+    <p>Each card below is a full pentest write-up: <strong>broad description</strong> (what it is + why it matters + business impact), "
+    "affected URLs, <strong>confirmed proof</strong> (double-probed differentials) vs <strong>unverified leads</strong>, "
+    "step-by-step attacker replay, gains, tools, and the <strong>fix + timeline</strong>. "
+    "Inconclusive re-tests are counted in a note, never listed as findings.</p>
+    <table class="vuln-main">
+        <thead><tr><th>Severity</th><th>Type</th><th>Affected</th><th>Full description, proof, attacker replay &amp; fix</th></tr></thead>
         <tbody>{vuln_rows}</tbody>
     </table>
 
@@ -1635,6 +2115,13 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
         external_tools: List[Dict[str, Any]] = []
         scan_partial = False
 
+        # PHASE 0 — WAF gate runs FIRST on every mode that touches HTTP.
+        waf_info: Dict[str, Any] = {}
+        if args.mode in ('full', 'all', 'discovery', 'recon', 'vuln'):
+            with _phase('waf gate'):
+                waf_info = await run_waf_gate(target, args)
+            discovery_results['waf'] = waf_info
+
         if args.mode in ('full', 'all', 'discovery', 'recon'):
             with _phase('discovery'):
                 discovery_results = await run_discovery(
@@ -1674,13 +2161,41 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                       "This run will be marked PARTIAL.\n")
 
         if args.mode in ('full', 'all', 'vuln'):
-            stealth = args.profile == 'stealth' or (args.profile is None and False)
+            # Align with FrameworkConfig: stealth AND balanced are stealthy,
+            # aggressive/debug are not. Was `profile==stealth` only, so
+            # balanced printed stealth=OFF despite framework STEALTH_MODE=True.
+            _prof = (args.profile or os.getenv('AETHELRED_PROFILE', 'balanced')).lower()
+            stealth = _prof in ('stealth', 'balanced')
             # Feed every URL recon actually found (crawl, admin panels,
             # well-known endpoints) into the scanner instead of falling back
             # to the bare target URL.
             scan_urls = _scan_targets(discovery_results)
             with _phase('vulnerability scan'):
-                vulnerabilities = await run_vuln_scan(target, scan_urls, stealth)
+                vulnerabilities = await run_vuln_scan(target, scan_urls, stealth, waf_info=waf_info)
+            # Directory-listing harvest: files proven by content-sniff join
+            # the finding set as CONFIRMED (HTTP 200 + magic/marker proof),
+            # so the report shows real disclosed files, not leads.
+            _harvest = (discovery_results.get('listing_harvest') or {}).get('findings') or []
+            if _harvest:
+                for _i, _hf in enumerate(_harvest, 1):
+                    _ev = str(_hf.get('evidence', ''))
+                    _ev_low = _ev.lower()
+                    _sev = 'MEDIUM' if 'non-html file content' in _ev_low else 'HIGH'
+                    vulnerabilities.append({
+                        'id': f'listing-harvest-{_i}',
+                        'type': 'Exposed Sensitive File',
+                        'url': _hf.get('url', ''),
+                        'severity': _sev,
+                        'description': (f"{_hf.get('description', 'Exposed file')} "
+                                        f"({str(_hf.get('path', ''))}) — {_ev}"),
+                        'verified': True,
+                        'confidence': 'high',
+                        'evidence': {'proof': _ev},
+                        'payload': '',
+                        'source': 'listing_harvest',
+                    })
+                print(f"  [+] Listing harvest: {len(_harvest)} content-confirmed "
+                      f"file(s) added as verified findings")
             # External template engine (nuclei): installed -> runs against the
             # base target (nuclei's own templates handle path discovery),
             # missing -> one clean skip line.  Its matches are evidence-backed
@@ -1732,6 +2247,12 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             tech_list = discovery_results.get('technologies_with_confidence', [])
             if not tech_list:
                 tech_list = [{'technology': t, 'version': '', 'confidence': 1} for t in discovery_results.get('technologies', [])]
+            # Service banners carry versions the web crawler never sees
+            # (Exim 4.100.1, Dovecot, OpenSSH) — feed them to CVE mapping.
+            for _bt in _service_banner_techs(enumeration_results or {}):
+                if not any(str(t.get('technology', '')).lower().startswith(_bt['technology'].lower())
+                           for t in tech_list):
+                    tech_list.append(_bt)
             if tech_list:
                 cve_results = await run_cve_mapping(tech_list)
             # CISA KEV cross-reference: flag mapped CVEs exploited in the

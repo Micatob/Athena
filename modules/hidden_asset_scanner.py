@@ -107,6 +107,7 @@ class HiddenAssetScanner:
         self.security_headers: Dict[str, Any] = {}
         self.http_method_results: Dict[str, Any] = {}
         self.visited_urls: Set[str] = set()
+        self._baseline_length: int = 0
         self.logger = logging.getLogger("athena.hidden_asset")
 
     async def close(self) -> None:
@@ -134,6 +135,7 @@ class HiddenAssetScanner:
         self.http_method_results = {}
         self.probes_completed = 0
         self.probes_skipped = 0
+        self._baseline_length = int(baseline_length or 0)
         self._deadline = time.monotonic() + self.budget_seconds
 
         if not target.startswith(('http://', 'https://')):
@@ -240,6 +242,22 @@ class HiddenAssetScanner:
             if not isinstance(response, dict):
                 continue
             content = response["text"]
+            # Direct-fetch proof, never a guess: a 200 that is an HTML page
+            # (SPA catch-all / soft-404) is not a backup file. Archive or
+            # source markers, or a non-HTML content type, are required.
+            headers = response.get("headers") or {}
+            ct = str(headers.get("Content-Type", "")).lower()
+            head = content[:65536]
+            htmlish = ("html" in ct
+                       or head.lstrip().lower().startswith(("<!doctype", "<html")))
+            markers = (head[:2] in ("PK", "\x1f\x8b")
+                       or "<?php" in head or "define(" in head
+                       or "CREATE TABLE" in head.upper()
+                       or "INSERT INTO" in head.upper())
+            if htmlish and not markers:
+                continue
+            if self._baseline_length and len(content) == self._baseline_length:
+                continue      # homepage body served for everything = catch-all
             self.discovered_backup_files.append({
                 "path": backup_path,
                 "url": url,
