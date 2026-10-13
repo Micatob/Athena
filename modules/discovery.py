@@ -2314,11 +2314,14 @@ class DiscoveryModule:
 
                 # SANs (Subject Alternative Names)
                 sans = []
-                for ext in cert.get('subjectAltName', []):
-                    if ext[0] == 'DNS':
-                        sans.append(ext[1])
-                        if ext[1].startswith('*.') and ext[1] != f'*.{domain}':
-                            self._add_tech(f'Wildcard Cert: {ext[1]}', confidence=2)
+                for ext in (cert.get('subjectAltName') or []):
+                    try:
+                        if ext[0] == 'DNS':
+                            sans.append(ext[1])
+                            if ext[1].startswith('*.') and ext[1] != f'*.{domain}':
+                                self._add_tech(f'Wildcard Cert: {ext[1]}', confidence=2)
+                    except (IndexError, TypeError, AttributeError):
+                        continue
                 tls_info['subject_alt_names'] = sans
 
                 # Weak TLS version detection

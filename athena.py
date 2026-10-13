@@ -21,6 +21,8 @@ from modules.reporting import ReportGenerator
 from modules.bruteforce import BruteforceModule
 from modules.protocol_scanner import SMBEnumerator, SNMPEnumerator, SMTPEnumerator, POP3Enumerator, IMAPEnumerator, ServiceBruteforcer
 from modules.cve_mapper import CVEMapper, VersionCVEResult
+from modules.checkpoint import CheckpointManager
+from modules.correlation import correlate_tool_findings, is_tool_finding
 from modules.plugin_system import PluginLoader
 from modules.operations_guide import show_guide, generate_guide_json
 from modules.orchestration import (
@@ -94,6 +96,37 @@ class ScanState:
             os.remove(STATE_FILE)
 
 
+#: Checkpoint managers for in-flight targets.  Flushed on SIGINT so an
+#: interrupted run always leaves a resumable checkpoint behind.
+_ACTIVE_CHECKPOINTS: List[Any] = []
+
+
+def _register_checkpoint(ckpt: Any) -> None:
+    try:
+        if ckpt is not None and all(c is not ckpt for c in _ACTIVE_CHECKPOINTS):
+            _ACTIVE_CHECKPOINTS.append(ckpt)
+    except Exception:
+        pass
+
+
+def _flush_checkpoints() -> None:
+    """Persist every in-flight checkpoint and print resume commands."""
+    for ckpt in list(_ACTIVE_CHECKPOINTS):
+        try:
+            target = getattr(ckpt, 'target', '')
+            ckpt.touch()
+            done = []
+            try:
+                done = ckpt.completed_stages()
+            except Exception:
+                pass
+            cprint(f"  [*] Progress checkpointed for {target} "
+                   f"({', '.join(done) if done else 'no completed stages yet'})")
+            cprint(f"      Resume with: python athena.py -t {target} --resume")
+        except Exception:
+            pass
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog='athena',
@@ -153,8 +186,26 @@ Examples:
     exploit_group.add_argument('--exploit-delay', type=float, default=1.0,
                                help='Seconds to wait between exploit attempts (default: 1.0)')
     exploit_group.add_argument('--exploit-concurrency', type=int, default=6,
-                               help='Findings verified in parallel (default: 6, '
-                                    '1 = strictly sequential)')
+                                help='Findings verified in parallel (default: 6, '
+                                     '1 = strictly sequential)')
+
+    resilience_group = parser.add_argument_group('Resilience & Verification (Prompt A)')
+    resilience_group.add_argument('--restart', action='store_true',
+                                  help='Ignore any saved checkpoint and start fresh '
+                                       '(deletes the checkpoint for the target)')
+    resilience_group.add_argument('--checkpoint-dir',
+                                  help='Base directory for scan checkpoints '
+                                       '(default: ~/.athena/checkpoints)')
+    resilience_group.add_argument('--oob-domain',
+                                  help='Operator-owned domain for out-of-band callback '
+                                       'verification (marker: <token>.oob.<domain>)')
+    resilience_group.add_argument('--oob-wait', type=float, default=60.0,
+                                  help='Seconds to wait for an OOB callback per finding '
+                                       '(default: 60)')
+    resilience_group.add_argument('--allow-oob-third-party', action='store_true',
+                                  help='Allow OOB via third-party collectors (interactsh '
+                                       'public server, webhook.site). Without this flag '
+                                       'only operator-owned/local channels are used')
 
     tool_group = parser.add_argument_group('External Tools')
     tool_group.add_argument('--no-nuclei', action='store_true',
@@ -379,9 +430,9 @@ async def run_discovery(target: str, output_format: str = 'html',
         try:
             _dns = results.get('dns_records') or {}
             if _dns:
-                _ip = _dns.get('ip') or (', '.join(_dns.get('a_records', [])[:2]) if _dns.get('a_records') else 'n/a')
-                cprint(f"  [+] DNS: {_dns.get('domain','')} -> {_ip} | MX:{len(_dns.get('mx_records',[]))} "
-                      f"TXT:{len(_dns.get('txt_records',[]))} NS:{len(_dns.get('ns_records',[]))}")
+                _ip = _dns.get('ip') or (', '.join((_dns.get('a_records') or [])[:2]) if _dns.get('a_records') else 'n/a')
+                cprint(f"  [+] DNS: {_dns.get('domain','')} -> {_ip} | MX:{len(_dns.get('mx_records') or [])} "
+                      f"TXT:{len(_dns.get('txt_records') or [])} NS:{len(_dns.get('ns_records') or [])}")
                 if _dns.get('spf_analysis'):
                     cprint(f"      SPF: {_dns.get('spf_analysis')}")
                 if _dns.get('dmarc_analysis'):
@@ -396,15 +447,15 @@ async def run_discovery(target: str, output_format: str = 'html',
                           f"expiry={_tls.get('valid_until','?')}")
             _ha = results.get('hidden_assets') or {}
             if _ha:
-                cprint(f"  [+] Hidden assets: {len(_ha.get('hidden_directories',[]))} dirs, "
-                      f"{len(_ha.get('backup_files',[]))} backups, "
-                      f"{len(_ha.get('sensitive_files',[]))} sensitive")
+                cprint(f"  [+] Hidden assets: {len(_ha.get('hidden_directories') or [])} dirs, "
+                      f"{len(_ha.get('backup_files') or [])} backups, "
+                      f"{len(_ha.get('sensitive_files') or [])} sensitive")
             elif stages is None or 'hidden_assets' in (stages or []):
                 cprint(f"  [*] Hidden assets: none confirmed (see wildcard-filtered counts above)")
             _lh = results.get('listing_harvest') or {}
             if _lh.get('findings'):
                 cprint(f"  [+] Listing harvest: {len(_lh['findings'])} file(s) "
-                      f"content-confirmed from {len(_lh.get('listings', []))} open "
+                      f"content-confirmed from {len(_lh.get('listings') or [])} open "
                       f"listing(s) ({_lh.get('files_seen', 0)} files seen)")
             _sec = results.get('security_endpoints') or []
             cprint(f"  [+] Security endpoints: {len(_sec)} reachable (robots/security.txt/sitemap)")
@@ -634,12 +685,14 @@ def _phase(label: str):
 
 
 async def run_vuln_scan(target: str, urls: List[str] = None,
-                         stealth: bool = False,
-                         waf_info: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+                          stealth: bool = False,
+                          waf_info: Dict[str, Any] = None,
+                          resume_completed: Set[str] = None,
+                          progress_cb=None) -> List[Dict[str, Any]]:
     con.phase("PHASE 2: VULNERABILITY SCANNING")
     if waf_info and str(waf_info.get('verdict', '')) in ('confirmed', 'likely', 'hard-block'):
         cprint(f"  [*] Vuln scan WAF-aware: {waf_info.get('waf','WAF')} "
-              f"({waf_info.get('verdict')}) — bypass payloads + low rate")
+               f"({waf_info.get('verdict')}) — bypass payloads + low rate")
         stealth = True
     if not urls:
         if not target.startswith(('http://', 'https://')):
@@ -647,10 +700,39 @@ async def run_vuln_scan(target: str, urls: List[str] = None,
         urls = [target.rstrip('/') + '/']
     scanner = VulnerabilityScanner(stealth_mode=stealth, waf_info=waf_info)
     try:
-        results = await scanner.scan_all(urls)
+        results = await scanner.scan_all(urls, skip_urls=resume_completed,
+                                         progress_cb=progress_cb)
         return results
     finally:
         await scanner.close()
+
+
+async def _resumable_stage(ckpt, stage: str, runner, resume: bool = False):
+    """Run ``runner`` (an async zero-arg callable) unless ``stage`` is done.
+
+    Returns ``(result, resumed)``.  With ``resume=True`` a saved payload is
+    returned untouched and the stage body never executes - this is what
+    makes ``--resume`` skip completed stages instead of re-running them.
+    With ``resume=False`` the stage always runs; the checkpoint is only
+    written, so a fresh run replaces stale stage files as it goes.
+    """
+    if resume and ckpt is not None:
+        try:
+            if ckpt.has(stage):
+                saved = ckpt.load_stage(stage)
+                if saved is not None:
+                    cprint(f"  [*] Resume: stage '{stage}' loaded from checkpoint "
+                           f"(not re-run)")
+                    return saved, True
+        except Exception:
+            pass
+    result = await runner()
+    if ckpt is not None:
+        try:
+            ckpt.save_stage(stage, result)
+        except Exception as exc:
+            cprint(f"  [!] Checkpoint save failed for stage '{stage}': {exc}")
+    return result, False
 
 
 async def run_external_scan(target: str, stealth: bool = False,
@@ -959,12 +1041,12 @@ async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) 
             if admin_login_forms:
                 cprint(f"\n  [*] Phase 3a: Slow credential spray on admin panels "
                       f"(anti-lockout: sequential, 4-9s gaps, session-verified hits)...")
-                spray = await bf.slow_spray(admin_login_forms)
-                results['web_logins'].extend(spray.get('credentials', []))
-                results['spray_lockouts'] = spray.get('lockouts', [])
-                _st = spray.get('stats', {})
-                _ncreds = len(spray.get('credentials', []))
-                _nlock = len(spray.get('lockouts', []))
+                spray = await bf.slow_spray(admin_login_forms) or {}
+                results['web_logins'].extend(spray.get('credentials') or [])
+                results['spray_lockouts'] = spray.get('lockouts') or []
+                _st = spray.get('stats') or {}
+                _ncreds = len(spray.get('credentials') or [])
+                _nlock = len(spray.get('lockouts') or [])
                 cprint(f"  [*] Spray summary: {_st.get('attempts', 0)} attempt(s), "
                       f"{_st.get('forms', 0)} form(s), {_ncreds} verified success(es), "
                       f"{_nlock} lockout(s)")
@@ -1067,27 +1149,27 @@ async def run_enumeration(target: str, ports: List[int] = None) -> Dict[str, Any
             elif service == 'smtp':
                 cprint(f"  [*] SMTP enumeration on {host}:{port}")
                 smtp = SMTPEnumerator()
-                results[key] = await smtp.enumerate(host, port)
+                results[key] = await smtp.enumerate(host, port) or {}
                 if results[key].get('accessible'):
-                    cprint(f"    [+] SMTP accessible ({results[key].get('transport', 'plain')}): {results[key].get('banner', '')[:60]}")
+                    cprint(f"    [+] SMTP accessible ({results[key].get('transport', 'plain')}): {str(results[key].get('banner', ''))[:60]}")
                 # Back-compat alias: keep 'smtp' pointing at first accessible one
-                if results[key].get('accessible') and not results.get('smtp', {}).get('accessible'):
+                if results[key].get('accessible') and not (results.get('smtp') or {}).get('accessible'):
                     results['smtp'] = results[key]
             elif service == 'pop3':
                 cprint(f"  [*] POP3 enumeration on {host}:{port}")
                 pop3 = POP3Enumerator()
-                results[key] = await pop3.enumerate(host, port)
+                results[key] = await pop3.enumerate(host, port) or {}
                 if results[key].get('accessible'):
-                    cprint(f"    [+] POP3 accessible: {results[key].get('banner', '')[:60]}")
-                if results[key].get('accessible') and not results.get('pop3', {}).get('accessible'):
+                    cprint(f"    [+] POP3 accessible: {str(results[key].get('banner', ''))[:60]}")
+                if results[key].get('accessible') and not (results.get('pop3') or {}).get('accessible'):
                     results['pop3'] = results[key]
             elif service == 'imap':
                 cprint(f"  [*] IMAP enumeration on {host}:{port}")
                 imap = IMAPEnumerator()
-                results[key] = await imap.enumerate(host, port)
+                results[key] = await imap.enumerate(host, port) or {}
                 if results[key].get('accessible'):
-                    cprint(f"    [+] IMAP accessible: {results[key].get('banner', '')[:60]}")
-                if results[key].get('accessible') and not results.get('imap', {}).get('accessible'):
+                    cprint(f"    [+] IMAP accessible: {str(results[key].get('banner', ''))[:60]}")
+                if results[key].get('accessible') and not (results.get('imap') or {}).get('accessible'):
                     results['imap'] = results[key]
 
     return results
@@ -1167,17 +1249,22 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
                     output_format: str = 'html', output_path: str = None,
                     ai_analysis: Dict[str, Any] = None,
                     exploitation: Dict[str, Any] = None,
-                    external_tools: List[Dict[str, Any]] = None) -> str:
+                    external_tools: List[Dict[str, Any]] = None,
+                    correlation: Dict[str, Any] = None) -> str:
     report_gen = ReportGenerator()
+    # Defensive defaults: any phase may hand back None (timeout, WAF block,
+    # AI rate-limit). Report generation must never crash on that.
     report_data = {
-        'target': target,
+        'target': target or 'Unknown',
         'timestamp': datetime.now().isoformat(),
-        'discovery': discovery,
-        'vulnerabilities': vulnerabilities,
-        'exploitation': (exploitation.get('attempts', [])
+        'discovery': discovery if isinstance(discovery, dict) else {},
+        'vulnerabilities': [v for v in (vulnerabilities or []) if isinstance(v, dict)],
+        'exploitation': ([a for a in (exploitation.get('attempts', []) or []) if isinstance(a, dict)]
                          if isinstance(exploitation, dict)
-                         else (exploitation or [])),
+                         else [a for a in (exploitation or []) if isinstance(a, dict)]),
     }
+    if correlation and isinstance(correlation, dict):
+        report_data['correlation'] = correlation
     if ai_analysis:
         report_data['ai_analysis'] = ai_analysis
     if external_tools:
@@ -1400,9 +1487,9 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     recon_ran = bool(discovery_findings.get('ran'))
     empty_msg = ('<em>Not scanned in this mode (run -m full or -m discovery)</em>'
                  if not recon_ran else '<em>None detected</em>')
-    port_items = ''.join(f"<li>{p}</li>" for p in discovery_findings.get('open_ports', [])[:50])
-    url_items = ''.join(f"<li>{html.escape(str(u))}</li>" for u in discovery_findings.get('urls', [])[:50])
-    sub_items = ''.join(f"<li>{html.escape(str(s))}</li>" for s in discovery_findings.get('subdomains', [])[:50])
+    port_items = ''.join(f"<li>{p}</li>" for p in (discovery_findings.get('open_ports') or [])[:50])
+    url_items = ''.join(f"<li>{html.escape(str(u))}</li>" for u in (discovery_findings.get('urls') or [])[:50])
+    sub_items = ''.join(f"<li>{html.escape(str(s))}</li>" for s in (discovery_findings.get('subdomains') or [])[:50])
     if not recon_ran:
         tech_items = tech_items or '<em>Not scanned in this mode (run -m full or -m discovery)</em>'
 
@@ -1718,28 +1805,47 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     if attempts:
         attempt_rows = ''
         badge = {'confirmed': '#2e7d32', 'possible': '#b8860b', 'inconclusive': '#4a4a5a'}
+        proof_label = {'response_signature': 'RESPONSE', 'timing': 'TIMING',
+                       'oob': 'OOB', 'none': '—'}
         for a in attempts:
             attempt_status = str(a.get('status', 'inconclusive'))
             colour = badge.get(attempt_status, '#4a4a5a')
+            proof = str(a.get('proof_kind', '') or '').strip().lower()
+            proof_cell = proof_label.get(proof, '—')
             attempt_rows += (
                 f"<tr><td><span class=\"sev-badge\" style=\"background:{colour}\">"
                 f"{html.escape(attempt_status.upper())}</span></td>"
+                f"<td>{html.escape(proof_cell)}</td>"
                 f"<td>{html.escape(str(a.get('type', '')))}</td>"
                 f"<td><code>{html.escape(str(a.get('url', '')))}</code></td>"
                 f"<td>{html.escape(str(a.get('detail', '')))}</td></tr>")
+        _by_proof = summary.get('exploitation_by_proof') or {}
+        _proof_bits = ', '.join(
+            f"{k}: {_by_proof[k]}" for k in ('response_signature', 'timing', 'oob')
+            if isinstance(_by_proof, dict) and _by_proof.get(k))
+        _proof_line = (f" Proof kinds — {_proof_bits}." if _proof_bits else "")
+        _corr_line = ""
+        if summary.get('corroborated_findings') or summary.get('tool_only_findings'):
+            _corr_line = (f" Corroborated (native+nuclei agree): "
+                          f"<strong>{summary.get('corroborated_findings', 0)}</strong> | "
+                          f"Tool-only leads: "
+                          f"<strong>{summary.get('tool_only_findings', 0)}</strong>.")
         exploit_section = f"""
     <h2>Automated Exploitation</h2>
     <p>Every row below was actively re-tested by the exploitation runner
        (scope-gated, evidence required). <strong>confirmed</strong> = the handler
        reproduced the issue and produced proof; <strong>inconclusive</strong> =
-       no proof could be produced, treat the finding as unverified.</p>
+       no proof could be produced, treat the finding as unverified. The
+       <strong>Proof</strong> column shows <em>how</em> it was proven:
+       RESPONSE (handler signature), TIMING (differential sleep oracle),
+       OOB (out-of-band callback).</p>
     <p>Attempted: <strong>{summary.get('exploitation_attempted', 0)}</strong> |
        Confirmed: <strong>{summary.get('exploitation_confirmed', 0)}</strong> |
        Possible: <strong>{summary.get('exploitation_possible', 0)}</strong> |
        Inconclusive: <strong>{summary.get('exploitation_inconclusive', 0)}</strong> |
-       Demonstrations in this report: <strong>{summary.get('successful_demonstrations', 0)}</strong></p>
+       Demonstrations in this report: <strong>{summary.get('successful_demonstrations', 0)}</strong>{_proof_line}{_corr_line}</p>
     <table>
-        <thead><tr><th>Result</th><th>Type</th><th>URL</th><th>Evidence / reason</th></tr></thead>
+        <thead><tr><th>Result</th><th>Proof</th><th>Type</th><th>URL</th><th>Evidence / reason</th></tr></thead>
         <tbody>{attempt_rows}</tbody>
     </table>"""
     elif summary.get('exploitation_attempted', 0) == 0 and 'exploitation_attempted' in summary:
@@ -2096,7 +2202,8 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
 
 
 async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any]],
-                                args: argparse.Namespace) -> Dict[str, Any]:
+                                args: argparse.Namespace,
+                                waf_info: Dict[str, Any] = None) -> Dict[str, Any]:
     """Verify detected vulnerabilities automatically, inside engagement scope.
 
     Returns the runner summary (``status``/``confirmed``/``possible``/
@@ -2143,6 +2250,12 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
         delay=getattr(args, 'exploit_delay', 1.0),
         aggressive=bool(getattr(args, 'exploit_aggressive', False)),
         concurrency=getattr(args, 'exploit_concurrency', 6),
+        waf_info=waf_info if isinstance(waf_info, dict) else {},
+        oob={
+            'domain': getattr(args, 'oob_domain', '') or '',
+            'wait': getattr(args, 'oob_wait', 60.0) or 60.0,
+            'allow_third_party': bool(getattr(args, 'allow_oob_third_party', False)),
+        },
     )
     try:
         summary = await runner.execute(target, vulnerabilities)
@@ -2184,8 +2297,10 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
             attempt_status = str(attempt.get('status', 'inconclusive'))
             mark = marks.get(attempt_status, '-')
             detail = str(attempt.get('detail', '')).strip()
-            cprint(f"      [{mark}] {attempt_status}: {attempt.get('type', '')} "
-                  f"at {attempt.get('url', '')}")
+            proof = str(attempt.get('proof_kind', '') or '').strip()
+            proof_tag = f" [proof:{proof}]" if proof and proof != 'none' else ''
+            cprint(f"      [{mark}] {attempt_status}{proof_tag}: {attempt.get('type', '')} "
+                   f"at {attempt.get('url', '')}")
             if detail:
                 cprint(f"          {detail[:300]}")
     elif status == 'denied':
@@ -2206,6 +2321,40 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
     state = ScanState.load() if args.resume else None
 
     for target in targets:
+        # --- Prompt-A checkpoints: every stage persists on completion, so
+        # Ctrl+C or a traceback costs minutes, not the whole 45-minute run.
+        ckpt: Optional[CheckpointManager] = None
+        _ckpt_base = getattr(args, 'checkpoint_dir', None) or None
+        try:
+            if getattr(args, 'restart', False):
+                CheckpointManager(target, base_dir=_ckpt_base).clear()
+                cprint("  [*] --restart: previous checkpoint discarded")
+            ckpt = CheckpointManager(target, base_dir=_ckpt_base)
+            _register_checkpoint(ckpt)
+        except Exception as exc:
+            cprint(f"  [!] Checkpoint unavailable ({exc}); running without resume")
+            ckpt = None
+        _resuming = bool(getattr(args, 'resume', False)) and ckpt is not None
+        if ckpt is not None:
+            try:
+                ckpt.touch({'mode': getattr(args, 'mode', 'full')})
+                if _resuming and ckpt.completed_stages():
+                    saved_mode = str((ckpt._state.get('mode') or ''))
+                    if saved_mode and saved_mode != getattr(args, 'mode', 'full'):
+                        cprint(f"  [!] Checkpoint is from mode '{saved_mode}' but this run "
+                               f"is '{args.mode}' - ignoring checkpoint (fresh run)")
+                        _resuming = False
+                    elif ckpt.is_stale():
+                        cprint("  [!] Checkpoint older than 24h - ignoring (stale), "
+                               "starting fresh")
+                        ckpt.clear()
+                        _resuming = False
+                    else:
+                        cprint(f"  [+] Resuming from checkpoint "
+                               f"({', '.join(ckpt.completed_stages())} already done)")
+            except Exception:
+                pass
+
         con.phase("ATHENA SECURITY SUITE")
         cprint(f"  Target: {target}")
         cprint(f"  Profile: {args.profile or os.getenv('AETHELRED_PROFILE', 'balanced')}")
@@ -2217,39 +2366,59 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
         bruteforce_results: Dict[str, Any] = {}
         enumeration_results: Dict[str, Any] = {}
         external_tools: List[Dict[str, Any]] = []
+        correlation_stats: Dict[str, Any] = {}
         scan_partial = False
 
         # PHASE 0 — WAF gate runs FIRST on every mode that touches HTTP.
+        # On resume with a saved discovery stage the gate is skipped: the
+        # saved payload already carries the verdict.
         waf_info: Dict[str, Any] = {}
-        if args.mode in ('full', 'all', 'discovery', 'recon', 'vuln'):
+        _recon_saved = bool(_resuming and ckpt is not None
+                            and ckpt.has('discovery'))
+        if not _recon_saved and args.mode in ('full', 'all', 'discovery', 'recon', 'vuln'):
             with _phase('waf gate'):
                 waf_info = await run_waf_gate(target, args)
             discovery_results['waf'] = waf_info
 
-        if args.mode in ('full', 'all', 'discovery', 'recon'):
-            with _phase('discovery'):
-                discovery_results = await run_discovery(
-                    target, args.output, scan_types,
-                    parse_ports(args.ports) if args.ports else None,
-                    args.concurrent, args.rate, args.jitter
-                )
-            if args.pause:
-                input("  [*] Paused. Press Enter to continue...")
+        async def _run_recon_stage():
+            if args.mode in ('full', 'all', 'discovery', 'recon'):
+                with _phase('discovery'):
+                    res = await run_discovery(
+                        target, args.output, scan_types,
+                        parse_ports(args.ports) if args.ports else None,
+                        args.concurrent, args.rate, args.jitter
+                    )
+                if args.pause:
+                    input("  [*] Paused. Press Enter to continue...")
+                return res
+            elif args.mode == 'vuln':
+                # Light recon so the scan works from a real asset inventory
+                # (crawled URLs, subdomains, ports, tech) instead of a single
+                # guessed URL - and so the report's asset table is not empty.
+                from modules.discovery import DiscoveryModule as _Disc
+                with _phase('light discovery'):
+                    res = await run_discovery(
+                        target, args.output, scan_types,
+                        parse_ports(args.ports) if args.ports else None,
+                        args.concurrent, args.rate, args.jitter,
+                        stages=list(_Disc.LIGHT_STAGES),
+                    )
+                if args.pause:
+                    input("  [*] Paused. Press Enter to continue...")
+                return res
+            return {}
 
-        elif args.mode == 'vuln':
-            # Light recon so the scan works from a real asset inventory
-            # (crawled URLs, subdomains, ports, tech) instead of a single
-            # guessed URL - and so the report's asset table is not empty.
-            from modules.discovery import DiscoveryModule as _Disc
-            with _phase('light discovery'):
-                discovery_results = await run_discovery(
-                    target, args.output, scan_types,
-                    parse_ports(args.ports) if args.ports else None,
-                    args.concurrent, args.rate, args.jitter,
-                    stages=list(_Disc.LIGHT_STAGES),
-                )
-            if args.pause:
-                input("  [*] Paused. Press Enter to continue...")
+        if args.mode in ('full', 'all', 'discovery', 'recon', 'vuln'):
+            discovery_results, _ = await _resumable_stage(
+                ckpt, 'discovery', _run_recon_stage, resume=_resuming)
+            if not isinstance(discovery_results, dict):
+                discovery_results = {}
+            # run_discovery replaces the dict, which used to drop the WAF
+            # verdict gathered above - keep it on the payload.
+            if waf_info and 'waf' not in discovery_results:
+                discovery_results['waf'] = waf_info
+            elif isinstance(discovery_results.get('waf'), dict):
+                waf_info = discovery_results['waf']
 
         # Discovery failing quietly is the worst failure mode: the run keeps
         # going on the default endpoint set and still prints SCAN COMPLETE.
@@ -2274,8 +2443,59 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             # well-known endpoints) into the scanner instead of falling back
             # to the bare target URL.
             scan_urls = _scan_targets(discovery_results)
-            with _phase('vulnerability scan'):
-                vulnerabilities = await run_vuln_scan(target, scan_urls, stealth, waf_info=waf_info)
+            _vuln_saved = (ckpt.load_stage('vuln')
+                           if (_resuming and ckpt is not None and ckpt.has('vuln'))
+                           else None)
+            if isinstance(_vuln_saved, dict):
+                vulnerabilities = [v for v in (_vuln_saved.get('vulnerabilities') or [])
+                                   if isinstance(v, dict)]
+                cprint(f"  [*] Resume: stage 'vuln' loaded from checkpoint "
+                       f"({len(vulnerabilities)} finding(s), not re-run)")
+            else:
+                # Mid-stage resume: skip URLs a killed run already finished.
+                _completed: Set[str] = set()
+                if _resuming and ckpt is not None:
+                    try:
+                        _prog = ckpt.load_progress() or {}
+                        _completed = {u for u in (_prog.get('completed_urls') or [])
+                                      if isinstance(u, str)}
+                        if _completed:
+                            cprint(f"  [*] Resume: {len(_completed)} URL(s) already "
+                                   f"scanned, continuing mid-list")
+                    except Exception:
+                        _completed = set()
+                _done_list: List[str] = sorted(_completed)
+                _since_save = 0
+
+                def _vuln_progress(batch: List[str]) -> None:
+                    nonlocal _since_save
+                    try:
+                        for _u in batch or []:
+                            if isinstance(_u, str) and _u not in _completed:
+                                _completed.add(_u)
+                                _done_list.append(_u)
+                                _since_save += 1
+                        # Checkpoint every 25 URLs: a kill loses at most one
+                        # partial batch, never the whole 19-minute stage.
+                        if _since_save >= 25 and ckpt is not None:
+                            ckpt.save_progress({'scan_urls': list(scan_urls or []),
+                                                'completed_urls': list(_done_list)})
+                            _since_save = 0
+                    except Exception:
+                        pass
+
+                with _phase('vulnerability scan'):
+                    vulnerabilities = await run_vuln_scan(
+                        target, scan_urls, stealth, waf_info=waf_info,
+                        resume_completed=set(_completed),
+                        progress_cb=_vuln_progress)
+                if ckpt is not None:
+                    try:
+                        ckpt.save_stage('vuln', {'vulnerabilities': vulnerabilities,
+                                                 'scan_urls': list(scan_urls or [])})
+                        ckpt.clear_progress()
+                    except Exception as exc:
+                        cprint(f"  [!] Checkpoint save failed for stage 'vuln': {exc}")
             # Directory-listing harvest: files proven by content-sniff join
             # the finding set as CONFIRMED (HTTP 200 + magic/marker proof),
             # so the report shows real disclosed files, not leads.
@@ -2300,131 +2520,348 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                     })
                 cprint(f"  [+] Listing harvest: {len(_harvest)} content-confirmed "
                       f"file(s) added as verified findings")
-            # External template engine (nuclei): installed -> runs against the
-            # base target (nuclei's own templates handle path discovery),
-            # missing -> one clean skip line.  Its matches are evidence-backed
-            # and go through AI triage like our own findings.
-            with _phase('nuclei'):
-                nuclei_summary = await run_external_scan(
-                    target, stealth, args, native_findings=vulnerabilities)
-            if nuclei_summary:
-                external_tools.append(nuclei_summary)
-                extra = nuclei_summary.get('findings') or []
-                extra = [v for v in extra if isinstance(v, dict)]
-                if extra:
-                    cprint(f"  [+] Nuclei contributed {len(extra)} new finding(s)")
-                    vulnerabilities = list(vulnerabilities or []) + list(extra)
-            # Optional engines (sqlmap/dalfox confirm vulns; wafw00f/httpx add
-            # context).  Missing binaries print one skip line each; findings
-            # join AI triage and the exploitation runner untouched.
-            with _phase('external tools'):
+            async def _run_tools_stage():
+                _summaries: List[Dict[str, Any]] = []
+                _vulns: List[Dict[str, Any]] = list(vulnerabilities or [])
+                # External template engine (nuclei): installed -> runs against
+                # the base target (nuclei's own templates handle path
+                # discovery), missing -> one clean skip line.  Its matches
+                # are evidence-backed and go through AI triage like our own
+                # findings.
+                with _phase('nuclei'):
+                    nuclei_summary = await run_external_scan(
+                        target, stealth, args, native_findings=_vulns)
+                if nuclei_summary:
+                    _summaries.append(nuclei_summary)
+                    extra = [v for v in (nuclei_summary.get('findings') or [])
+                             if isinstance(v, dict)]
+                    if extra:
+                        cprint(f"  [+] Nuclei contributed {len(extra)} new finding(s)")
+                        _vulns = list(_vulns or []) + list(extra)
+                # Optional engines (sqlmap/dalfox confirm vulns; wafw00f/httpx
+                # add context).  Missing binaries print one skip line each;
+                # findings join AI triage and the exploitation runner untouched.
+                with _phase('external tools'):
+                    try:
+                        extended = await run_extended_tools(target, args, scan_urls)
+                    except Exception as exc:  # pragma: no cover - never break scan
+                        cprint(f"  [!] Extended tools aborted: {exc}")
+                        extended = []
+                for summary in extended or []:
+                    if not isinstance(summary, dict):
+                        continue
+                    _summaries.append(summary)
+                    extra = [v for v in (summary.get('findings') or []) if isinstance(v, dict)]
+                    if extra:
+                        cprint(f"  [+] {summary.get('tool', 'tool')} contributed "
+                               f"{len(extra)} new finding(s)")
+                        _vulns = list(_vulns or []) + list(extra)
+                return {'vulnerabilities': _vulns, 'external_tools': _summaries}
+
+            _tools_saved = (ckpt.load_stage('tools')
+                            if (_resuming and ckpt is not None and ckpt.has('tools'))
+                            else None)
+            if isinstance(_tools_saved, dict):
+                vulnerabilities = [v for v in (_tools_saved.get('vulnerabilities') or [])
+                                   if isinstance(v, dict)]
+                external_tools = [s for s in (_tools_saved.get('external_tools') or [])
+                                  if isinstance(s, dict)]
+                _corr_saved = _tools_saved.get('correlation') or {}
+                correlation_stats = _corr_saved if isinstance(_corr_saved, dict) else {}
+                cprint(f"  [*] Resume: stage 'tools' loaded from checkpoint "
+                       f"({len(vulnerabilities)} finding(s), not re-run)")
+            else:
+                _tools_out = await _run_tools_stage()
+                vulnerabilities = [v for v in (_tools_out.get('vulnerabilities') or [])
+                                   if isinstance(v, dict)]
+                external_tools = [s for s in (_tools_out.get('external_tools') or [])
+                                  if isinstance(s, dict)]
+                # Cross-tool correlation: merge native findings with nuclei
+                # matches on (path, parameter, vuln class).  Agreement becomes
+                # one corroborated finding; nuclei-only matches stay labelled
+                # tool_only so the report separates signal from leads.
                 try:
-                    extended = await run_extended_tools(target, args, scan_urls)
-                except Exception as exc:  # pragma: no cover - never break scan
-                    cprint(f"  [!] Extended tools aborted: {exc}")
-                    extended = []
-            for summary in extended or []:
-                if not isinstance(summary, dict):
-                    continue
-                external_tools.append(summary)
-                extra = [v for v in (summary.get('findings') or []) if isinstance(v, dict)]
-                if extra:
-                    cprint(f"  [+] {summary.get('tool', 'tool')} contributed "
-                          f"{len(extra)} new finding(s)")
-                    vulnerabilities = list(vulnerabilities or []) + list(extra)
-                # httpx enriches recon: fold probed tech into discovery so
-                # CVE mapping sees versions the crawler missed.
+                    _natives = [v for v in vulnerabilities if not is_tool_finding(v)]
+                    _tooled = [v for v in vulnerabilities if is_tool_finding(v)]
+                    _corr = correlate_tool_findings(_natives, _tooled)
+                    vulnerabilities = _corr.merged
+                    correlation_stats = _corr.summary()
+                    if _corr.corroborated or _corr.tool_only:
+                        cprint(f"  [+] Correlation: {_corr.corroborated} corroborated "
+                               f"(native+nuclei agree), {_corr.tool_only} tool-only, "
+                               f"{_corr.native_only} native-only")
+                except Exception as exc:
+                    correlation_stats = {}
+                    cprint(f"  [!] Correlation skipped ({exc}); findings unmerged")
+                if ckpt is not None:
+                    try:
+                        ckpt.save_stage('tools', {'vulnerabilities': vulnerabilities,
+                                                  'external_tools': external_tools,
+                                                  'correlation': correlation_stats})
+                    except Exception as exc:
+                        cprint(f"  [!] Checkpoint save failed for stage 'tools': {exc}")
+            # httpx enriches recon: fold probed tech into discovery so
+            # CVE mapping sees versions the crawler missed.  The merge is
+            # idempotent, so replaying it on resume is safe.
+            for summary in external_tools:
                 if isinstance(summary, dict) and summary.get('tool') == 'httpx':
                     _merge_httpx_into_discovery(discovery_results, summary)
             if args.pause:
                 input("  [*] Paused. Press Enter to continue...")
 
         if args.mode in ('full', 'all', 'bruteforce', 'recon'):
-            with _phase('bruteforce'):
-                bruteforce_results = await run_bruteforce(target, discovery_results)
+            async def _run_bruteforce_stage():
+                with _phase('bruteforce'):
+                    return await run_bruteforce(target, discovery_results)
+            bruteforce_results, _ = await _resumable_stage(
+                ckpt, 'bruteforce', _run_bruteforce_stage, resume=_resuming)
+            if not isinstance(bruteforce_results, dict):
+                bruteforce_results = {}
 
         if args.mode in ('full', 'all', 'recon', 'discovery'):
             ports = discovery_results.get('ports', [])
-            with _phase('service enumeration'):
-                enumeration_results = await run_enumeration(target, ports)
+
+            async def _run_enumeration_stage():
+                with _phase('service enumeration'):
+                    return await run_enumeration(target, ports)
+            enumeration_results, _ = await _resumable_stage(
+                ckpt, 'enumeration', _run_enumeration_stage, resume=_resuming)
+            if not isinstance(enumeration_results, dict):
+                enumeration_results = {}
 
         cve_results = []
         kev_summary: Dict[str, Any] = {}
         if args.mode in ('full', 'all', 'recon'):
-            tech_list = discovery_results.get('technologies_with_confidence', [])
-            if not tech_list:
-                tech_list = [{'technology': t, 'version': '', 'confidence': 1} for t in discovery_results.get('technologies', [])]
-            # Service banners carry versions the web crawler never sees
-            # (Exim 4.100.1, Dovecot, OpenSSH) — feed them to CVE mapping.
-            for _bt in _service_banner_techs(enumeration_results or {}):
-                if not any(str(t.get('technology', '')).lower().startswith(_bt['technology'].lower())
-                           for t in tech_list):
-                    tech_list.append(_bt)
-            if tech_list:
-                cve_results = await run_cve_mapping(tech_list)
-            # CISA KEV cross-reference: flag mapped CVEs exploited in the
-            # wild (cached feed, offline-safe, opt-out with --no-kev).
-            if cve_results and not getattr(args, 'no_kev', False):
-                try:
-                    from modules.kev import load_kev_catalog, annotate_cve_results
-                    _catalog = load_kev_catalog()
-                    kev_summary = annotate_cve_results(cve_results, _catalog) or {}
-                    if int(kev_summary.get('kev_count', 0) or 0):
-                        cprint(f"  [+] CISA KEV: {kev_summary['kev_count']} mapped CVE(s) "
-                              f"are exploited in the wild "
-                              f"({', '.join(kev_summary.get('kev_ids', [])[:5])})")
-                except Exception as exc:  # pragma: no cover - never break scan
-                    cprint(f"  [!] KEV enrichment skipped: {exc}")
+            async def _run_cve_stage():
+                from modules.cve_mapper import cve_results_to_json
+                _cve: List[Any] = []
+                _kev: Dict[str, Any] = {}
+                tech_list = discovery_results.get('technologies_with_confidence', [])
+                if not tech_list:
+                    tech_list = [{'technology': t, 'version': '', 'confidence': 1} for t in discovery_results.get('technologies', [])]
+                # Service banners carry versions the web crawler never sees
+                # (Exim 4.100.1, Dovecot, OpenSSH) — feed them to CVE mapping.
+                for _bt in _service_banner_techs(enumeration_results or {}):
+                    if not any(str(t.get('technology', '')).lower().startswith(_bt['technology'].lower())
+                               for t in tech_list):
+                        tech_list.append(_bt)
+                if tech_list:
+                    _cve = await run_cve_mapping(tech_list)
+                # CISA KEV cross-reference: flag mapped CVEs exploited in the
+                # wild (cached feed, offline-safe, opt-out with --no-kev).
+                if _cve and not getattr(args, 'no_kev', False):
+                    try:
+                        from modules.kev import load_kev_catalog, annotate_cve_results
+                        _catalog = load_kev_catalog()
+                        _kev = annotate_cve_results(_cve, _catalog) or {}
+                        if int(_kev.get('kev_count', 0) or 0):
+                            cprint(f"  [+] CISA KEV: {_kev['kev_count']} mapped CVE(s) "
+                                   f"are exploited in the wild "
+                                   f"({', '.join((_kev.get('kev_ids') or [])[:5])})")
+                    except Exception as exc:  # pragma: no cover - never break scan
+                        cprint(f"  [!] KEV enrichment skipped: {exc}")
+                return {'cve': cve_results_to_json(_cve), 'kev': _kev}
+
+            _cve_saved = (ckpt.load_stage('cve')
+                          if (_resuming and ckpt is not None and ckpt.has('cve'))
+                          else None)
+            if isinstance(_cve_saved, dict):
+                from modules.cve_mapper import cve_results_from_json
+                cve_results = cve_results_from_json(_cve_saved.get('cve'))
+                kev_summary = _cve_saved.get('kev') or {}
+                if not isinstance(kev_summary, dict):
+                    kev_summary = {}
+                cprint(f"  [*] Resume: stage 'cve' loaded from checkpoint "
+                       f"({len(cve_results)} tech mapping(s), not re-run)")
+            else:
+                _cve_out = await _run_cve_stage()
+                from modules.cve_mapper import cve_results_from_json
+                cve_results = cve_results_from_json((_cve_out or {}).get('cve'))
+                kev_summary = (_cve_out or {}).get('kev') or {}
+                if not isinstance(kev_summary, dict):
+                    kev_summary = {}
+                if ckpt is not None:
+                    try:
+                        ckpt.save_stage('cve', {'cve': (_cve_out or {}).get('cve', []),
+                                                'kev': kev_summary})
+                    except Exception as exc:
+                        cprint(f"  [!] Checkpoint save failed for stage 'cve': {exc}")
             if kev_summary:
                 (discovery_results.setdefault('kev', {}).update(kev_summary)
                  if isinstance(discovery_results, dict) else None)
 
-        # Run AI analysis and filter false positives
-        ai_analysis = {}
+        # Run AI analysis and filter false positives.
+        # Never let an AI failure kill the scan: triage is advisory only.
+        ai_analysis: Dict[str, Any] = {}
         if vulnerabilities or discovery_results:
-            ai_analysis = await run_ai_analysis(
-                target, discovery_results, vulnerabilities,
-                {"mode": args.mode}
-            )
-            
-            # Drop findings the AI flagged as likely false positives.  The
-            # wording must match what happens: they leave the *active* set
-            # (no exploitation, no attack path) but stay in the report.
-            filtered_indices = ai_analysis.get("filtered_indices", [])
-            if filtered_indices:
-                original_count = len(vulnerabilities)
-                vulnerabilities = [v for i, v in enumerate(vulnerabilities) if i not in filtered_indices]
-                filtered_count = original_count - len(vulnerabilities)
-                if filtered_count > 0:
-                    cprint(ai_filter_notice(original_count, len(vulnerabilities),
-                                           filtered_count))
-            print_ai_degraded(ai_analysis)
+            async def _run_ai_stage():
+                try:
+                    _ai = await run_ai_analysis(
+                        target, discovery_results, vulnerabilities,
+                        {"mode": args.mode}
+                    )
+                except Exception as exc:
+                    cprint(f"  [!] AI analysis aborted ({exc}); continuing with unfiltered findings")
+                    try:
+                        import traceback as _tb
+                        with open("athena_errors.log", "a", encoding="utf-8") as _ef:
+                            _ef.write(f"\n[{datetime.now().isoformat()}] AI analysis failure for {target}: {exc}\n")
+                            _tb.print_exc(file=_ef)
+                    except Exception:
+                        pass
+                    _ai = {}
+                if not isinstance(_ai, dict):
+                    _ai = {}
+                # Drop findings the AI flagged as likely false positives.
+                # The wording must match what happens: they leave the *active*
+                # set (no exploitation, no attack path) but stay in the report.
+                try:
+                    _idx = _ai.get("filtered_indices", []) or []
+                    _idx = [i for i in _idx if isinstance(i, int)]
+                except Exception:
+                    _idx = []
+                _kept = list(vulnerabilities or [])
+                if _idx:
+                    _original = len(_kept)
+                    _drop = set(_idx)
+                    _kept = [v for i, v in enumerate(_kept) if i not in _drop]
+                    if _original - len(_kept) > 0:
+                        cprint(ai_filter_notice(_original, len(_kept),
+                                                _original - len(_kept)))
+                try:
+                    print_ai_degraded(_ai)
+                except Exception:
+                    pass
+                return {'ai_analysis': _ai, 'vulnerabilities': _kept}
 
-        # Actively verify what survived triage (scope-gated, safe mode by default)
+            _ai_saved = (ckpt.load_stage('ai')
+                         if (_resuming and ckpt is not None and ckpt.has('ai'))
+                         else None)
+            if isinstance(_ai_saved, dict):
+                ai_analysis = _ai_saved.get('ai_analysis') or {}
+                if not isinstance(ai_analysis, dict):
+                    ai_analysis = {}
+                vulnerabilities = [v for v in (_ai_saved.get('vulnerabilities') or [])
+                                   if isinstance(v, dict)]
+                cprint(f"  [*] Resume: stage 'ai' loaded from checkpoint "
+                       f"({len(vulnerabilities)} kept finding(s), not re-run)")
+                try:
+                    print_ai_degraded(ai_analysis)
+                except Exception:
+                    pass
+            else:
+                _ai_out = await _run_ai_stage()
+                ai_analysis = (_ai_out or {}).get('ai_analysis') or {}
+                if not isinstance(ai_analysis, dict):
+                    ai_analysis = {}
+                vulnerabilities = [v for v in ((_ai_out or {}).get('vulnerabilities') or [])
+                                   if isinstance(v, dict)]
+                if ckpt is not None:
+                    try:
+                        ckpt.save_stage('ai', {'ai_analysis': ai_analysis,
+                                               'vulnerabilities': vulnerabilities})
+                    except Exception as exc:
+                        cprint(f"  [!] Checkpoint save failed for stage 'ai': {exc}")
+
+        # Actively verify what survived triage (scope-gated, safe mode by default).
+        # Never let the verifier kill the scan either.
         exploitation_summary: Optional[Dict[str, Any]] = None
         if vulnerabilities and not getattr(args, 'no_auto_exploit', False):
-            exploitation_summary = await run_auto_exploitation(target, vulnerabilities, args)
+            async def _run_exploit_stage():
+                try:
+                    return await run_auto_exploitation(target, vulnerabilities, args,
+                                                       waf_info=waf_info)
+                except Exception as exc:
+                    cprint(f"  [!] Automated exploitation aborted ({exc}); continuing to reporting")
+                    try:
+                        import traceback as _tb
+                        with open("athena_errors.log", "a", encoding="utf-8") as _ef:
+                            _ef.write(f"\n[{datetime.now().isoformat()}] Exploitation failure for {target}: {exc}\n")
+                            _tb.print_exc(file=_ef)
+                    except Exception:
+                        pass
+                    return {
+                        'status': 'denied',
+                        'scope_reason': f'automated exploitation failed: {exc}',
+                        'mode': 'safe',
+                        'attempted': 0, 'confirmed': 0, 'possible': 0,
+                        'inconclusive': 0, 'attempts': [], 'duration_ms': 0,
+                        'detected': len(vulnerabilities or []), 'candidates': 0,
+                        'by_proof': {},
+                    }
+            exploitation_summary, _ex_resumed = await _resumable_stage(
+                ckpt, 'exploitation', _run_exploit_stage, resume=_resuming)
+            if not isinstance(exploitation_summary, dict):
+                exploitation_summary = None
+            if _ex_resumed and isinstance(exploitation_summary, dict):
+                cprint(f"  [*] Resume: exploitation recap - "
+                       f"{exploitation_summary.get('confirmed', 0)} confirmed, "
+                       f"{exploitation_summary.get('possible', 0)} possible, "
+                       f"{exploitation_summary.get('inconclusive', 0)} inconclusive "
+                       f"({exploitation_summary.get('attempted', 0)} attempted)")
 
-        output_path = generate_report(
-            target, discovery_results, vulnerabilities, bruteforce_results,
-            enumeration_results, cve_results, args.output, args.export,
-            ai_analysis=ai_analysis,
-            exploitation=exploitation_summary,
-            external_tools=external_tools,
-        )
+        # Reporting must never lose a finished scan.  A report-generation
+        # crash used to discard 30+ minutes of results with only
+        # "Fatal error: 'NoneType' object has no attribute 'get'".
+        # Now: retry hardened, then fall back to a minimal JSON dump.
+        try:
+            output_path = generate_report(
+                target, discovery_results, vulnerabilities, bruteforce_results,
+                enumeration_results, cve_results, args.output, args.export,
+                ai_analysis=ai_analysis,
+                exploitation=exploitation_summary,
+                external_tools=external_tools,
+                correlation=correlation_stats,
+            )
+        except Exception as exc:
+            cprint(f"  [!] Report generation failed ({exc}); writing emergency fallback report")
+            try:
+                import traceback as _tb
+                with open("athena_errors.log", "a", encoding="utf-8") as _ef:
+                    _ef.write(f"\n[{datetime.now().isoformat()}] Report failure for {target}: {exc}\n")
+                    _tb.print_exc(file=_ef)
+            except Exception:
+                pass
+            try:
+                safe_name = target.replace('https://', '').replace('http://', '').replace('/', '_').replace(':', '_')
+                output_path = args.export or f"report_{safe_name}"
+                _fallback = {
+                    'target': target,
+                    'timestamp': datetime.now().isoformat(),
+                    'note': f'Full report failed ({exc}); fallback contains raw findings.',
+                    'discovery': discovery_results if isinstance(discovery_results, dict) else {},
+                    'vulnerabilities': [v for v in (vulnerabilities or []) if isinstance(v, dict)],
+                    'bruteforce': bruteforce_results if isinstance(bruteforce_results, dict) else {},
+                    'enumeration': enumeration_results if isinstance(enumeration_results, dict) else {},
+                    'ai_analysis': ai_analysis if isinstance(ai_analysis, dict) else {},
+                    'exploitation': exploitation_summary if isinstance(exploitation_summary, dict) else {},
+                    'external_tools': [s for s in (external_tools or []) if isinstance(s, dict)],
+                }
+                with open(f"{output_path}.fallback.json", "w", encoding="utf-8") as _ff:
+                    json.dump(_fallback, _ff, indent=2, default=str)
+                cprint(f"  [+] Fallback report: {output_path}.fallback.json")
+                scan_partial = True
+            except Exception as exc2:
+                cprint(f"  [!] Fallback report also failed: {exc2}")
+                output_path = args.export or f"report_{target.replace('https://','').replace('http://','')}"
+                scan_partial = True
 
         # Hand the scan's findings to the post-exploitation stage so its
         # roadmap is built from real results when --post follows a scan.
-        args.scan_results = {
-            "target": target,
-            "timestamp": datetime.now().isoformat(),
-            "vulnerabilities": list(vulnerabilities),
-            "discovery": discovery_results or {},
-            "bruteforce": bruteforce_results or {},
-            "exploitation": (exploitation_summary.get("attempts", [])
-                             if isinstance(exploitation_summary, dict) else []),
-            "partial": scan_partial,
-        }
+        try:
+            args.scan_results = {
+                "target": target,
+                "timestamp": datetime.now().isoformat(),
+                "vulnerabilities": [v for v in (vulnerabilities or []) if isinstance(v, dict)],
+                "discovery": discovery_results if isinstance(discovery_results, dict) else {},
+                "bruteforce": bruteforce_results if isinstance(bruteforce_results, dict) else {},
+                "exploitation": (exploitation_summary.get("attempts", [])
+                                 if isinstance(exploitation_summary, dict) else []),
+                "partial": scan_partial,
+            }
+        except Exception:
+            args.scan_results = {"target": target, "partial": True,
+                                 "vulnerabilities": [], "discovery": {}}
 
         con.phase("SCAN COMPLETE" + (" (PARTIAL)" if scan_partial else ""))
         if scan_partial:
@@ -2558,22 +2995,28 @@ async def run_post_exploitation(targets: List[str], args: argparse.Namespace) ->
     cprint(f"  Critical findings: {len(report['critical_findings'])}")
     cprint(f"  Root obtained: {report['is_root']}")
     cprint(f"  Live sessions: {report.get('sessions_total', 1)}")
-    if report.get("edr_policy", {}).get("edr_detected"):
-        suppressed = report["edr_policy"].get("suppressed", [])
-        cprint(f"  EDR detected - suppressed: {', '.join(suppressed) or 'none'}")
+    if (report.get("edr_policy") or {}).get("edr_detected"):
+        suppressed = (report.get("edr_policy") or {}).get("suppressed", []) or []
+        cprint(f"  EDR detected - suppressed: {', '.join(str(s) for s in suppressed) or 'none'}")
     roadmap = report.get("roadmap") or {}
+    if not isinstance(roadmap, dict):
+        roadmap = {}
     summary = roadmap.get("summary") or {}
+    if not isinstance(summary, dict):
+        summary = {}
     if summary:
         cprint(f"  Roadmap: {summary.get('phases_applicable', 0)}/"
               f"{summary.get('phases_total', 0)} applicable phase(s), "
               f"{summary.get('actions_total', 0)} action(s) "
-              f"({summary.get('actions_by_execution', {}).get('automated', 0)} "
+              f"({(summary.get('actions_by_execution') or {}).get('automated', 0)} "
               f"automatable)")
     cprint(f"{'='*60}\n")
 
     if report.get("sessions"):
         cprint("  Tracked sessions:")
-        for row in report["sessions"]:
+        for row in report.get("sessions") or []:
+            if not isinstance(row, dict):
+                continue
             parent = f" <- {row['parent_session']}" if row.get("parent_session") else ""
             cprint(f"    {row['id']}  {row['target']}  [{row['shell_type']}] "
                   f"{row['state']} scope={row['scope_decision']}{parent}")
@@ -3435,11 +3878,26 @@ async def main():
         await run_scan_session(targets, args)
     except KeyboardInterrupt:
         cprint("\n[!] Interrupted by user")
-        sys.exit(1)
+        # Flush in-flight checkpoints BEFORE exit so the run is resumable.
+        try:
+            _flush_checkpoints()
+        except Exception:
+            pass
+        sys.exit(130)
     except Exception as e:
         cprint(f"\n[!] Fatal error: {e}")
+        import traceback
+        # Always persist the full traceback: without -v the operator only
+        # saw "Fatal error: 'NoneType' object has no attribute 'get'" with
+        # no file/line to act on. Console stays short; details go to file.
+        try:
+            with open("athena_errors.log", "a", encoding="utf-8") as _ef:
+                _ef.write(f"\n[{datetime.now().isoformat()}] FATAL for {targets}: {e}\n")
+                traceback.print_exc(file=_ef)
+            cprint("  [*] Full traceback written to athena_errors.log")
+        except Exception:
+            pass
         if args.verbose:
-            import traceback
             traceback.print_exc()
         sys.exit(1)
 

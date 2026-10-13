@@ -274,11 +274,14 @@ class AttackGraph:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AttackGraph":
-        graph = cls(engagement_id=data.get("engagement_id", ""))
-        for node in data.get("nodes", []):
-            graph.add_node(PathNode.from_dict(node))
-        for edge in data.get("edges", []):
-            graph.add_edge(PathEdge.from_dict(edge))
+        data = data if isinstance(data, dict) else {}
+        graph = cls(engagement_id=str(data.get("engagement_id", "") or ""))
+        for node in (data.get("nodes") or []):
+            if isinstance(node, dict):
+                graph.add_node(PathNode.from_dict(node))
+        for edge in (data.get("edges") or []):
+            if isinstance(edge, dict):
+                graph.add_edge(PathEdge.from_dict(edge))
         return graph
 
     @classmethod
@@ -340,14 +343,16 @@ def build_graph(engagement_id: str, findings: List[Dict[str, Any]],
 
     # -- session-derived nodes ----------------------------------------------
     for session in sessions or []:
-        target = session.get("target", "")
-        session_state = session.get("state", "dead")
+        if not isinstance(session, dict):
+            continue
+        target = session.get("target", "") or ""
+        session_state = session.get("state", "dead") or "dead"
         active = session_state == "active"
 
-        session_id = _stable_id("session", session.get("id", target))
+        session_id = _stable_id("session", session.get("id", target) or target)
         host_id = _stable_id("host", target)
         user_id = _stable_id("user",
-                             f"{session.get('user', {}).get('username', '')}@{target}")
+                             f"{(session.get('user') or {}).get('username', '')}@{target}")
 
         graph.add_node(PathNode(
             id=host_id, type=NodeType.HOST, label=target,
@@ -361,12 +366,12 @@ def build_graph(engagement_id: str, findings: List[Dict[str, Any]],
                   "shell": session.get("shell_type", "")},
             source="session",
         ))
-        username = session.get("user", {}).get("username", "")
+        username = (session.get("user") or {}).get("username", "") or ""
         if username:
             graph.add_node(PathNode(
                 id=user_id, type=NodeType.USER, label=username,
                 state=PathState.CONFIRMED if active else PathState.POTENTIAL,
-                data={"is_root": session.get("user", {}).get("is_root", False)},
+                data={"is_root": (session.get("user") or {}).get("is_root", False)},
                 source="session",
             ))
             graph.upsert_edge(
@@ -389,7 +394,9 @@ def build_graph(engagement_id: str, findings: List[Dict[str, Any]],
             data={"cidr": network.get("cidr", "")},
             source="network_context",
         ))
-        for host in network.get("hosts", []):
+        for host in (network.get("hosts") or []):
+            if not isinstance(host, str) or not host:
+                continue
             hid = _stable_id("host", host)
             if hid not in graph.nodes:
                 graph.add_node(PathNode(

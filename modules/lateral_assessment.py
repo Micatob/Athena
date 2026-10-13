@@ -145,7 +145,8 @@ class LateralCandidate:
             reachability_source=data.get("reachability_source", ""),
             scope_decision=data.get("scope_decision", ""),
             validation_evidence_id=data.get("validation_evidence_id", ""),
-            timeline=[dict(t) for t in data.get("timeline", [])],
+            timeline=[dict(t) for t in (data.get("timeline") or [])
+                      if isinstance(t, dict)],
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
             metadata=dict(data.get("metadata", {})),

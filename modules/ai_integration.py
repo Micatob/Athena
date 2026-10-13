@@ -735,6 +735,8 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         not AI. The AI is only used for optional enhancement.
         """
         # Apply engagement filter if specified
+        findings = [f for f in (findings or []) if isinstance(f, dict)]
+        evidence = [e for e in (evidence or []) if isinstance(e, dict)]
         if engagement_id:
             findings = [f for f in findings if f.get("engagement_id") == engagement_id]
         
@@ -803,7 +805,7 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         return AICorrelationResult(
             correlation_type=AICorrelationType.FINDING_DEDUP,
             statements=statements,
-            input_findings=[f.get("id", "") for f in findings],
+            input_findings=[f.get("id", "") for f in findings if isinstance(f, dict)],
             output_findings=output_findings,
             confidence=0.95 if not self._enabled else 0.85,
             reasoning="Deterministic deduplication with optional AI enhancement",
@@ -820,8 +822,10 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         """
         prioritized = []
         statements = []
-        
-        for finding in findings:
+
+        for finding in findings or []:
+            if not isinstance(finding, dict):
+                continue
             score = self._calculate_priority_score(finding, context)
             prioritized.append((score, finding))
             
@@ -840,8 +844,8 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         return AICorrelationResult(
             correlation_type=AICorrelationType.PRIORITY,
             statements=statements,
-            input_findings=[f.get("id", "") for f in findings],
-            output_findings=[f.get("id", "") for _, f in prioritized],
+            input_findings=[f.get("id", "") for f in (findings or []) if isinstance(f, dict)],
+            output_findings=[f.get("id", "") for _, f in prioritized if isinstance(f, dict)],
             confidence=0.85,
             reasoning="Deterministic priority scoring based on severity and confidence",
         )
@@ -891,7 +895,7 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         return AICorrelationResult(
             correlation_type=AICorrelationType.ATTACK_PATH,
             statements=statements,
-            input_findings=[f.get("id", "") for f in findings],
+            input_findings=[f.get("id", "") for f in (findings or []) if isinstance(f, dict)],
             output_findings=[],
             confidence=0.9,
             reasoning="Deterministic graph traversal with optional AI enhancement",
@@ -932,19 +936,23 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
     ) -> Dict[str, List[Dict[str, Any]]]:
         """Group findings by dedup key deterministically."""
         groups: Dict[str, List[Dict[str, Any]]] = {}
-        for finding in findings:
+        for finding in findings or []:
+            if not isinstance(finding, dict):
+                continue
             key = finding.get("dedup_key") or self._compute_dedup_key(finding)
             if key not in groups:
                 groups[key] = []
             groups[key].append(finding)
         return groups
-    
+
     def _compute_dedup_key(self, finding: Dict[str, Any]) -> str:
         """Compute a stable dedup key for a finding."""
-        title = (finding.get("title") or "").strip().lower()
-        asset = (finding.get("affected_asset") or finding.get("url") or "").strip().lower()
-        module = (finding.get("detection_module") or "").strip().lower()
-        finding_type = (finding.get("type") or "").strip().lower()
+        if not isinstance(finding, dict):
+            return "unknown|||"
+        title = str(finding.get("title") or "").strip().lower()
+        asset = str(finding.get("affected_asset") or finding.get("url") or "").strip().lower()
+        module = str(finding.get("detection_module") or "").strip().lower()
+        finding_type = str(finding.get("type") or "").strip().lower()
         
         # Normalize common variations
         title = self._normalize_title(title)
@@ -1000,15 +1008,28 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
             "info": 0.0,
         }
         
-        severity = finding.get("severity", "info").lower()
+        severity = str(finding.get("severity", "info") or "info").lower()
         base_score = severity_scores.get(severity, 0.0)
-        
-        # Confidence multiplier
+
+        # Confidence multiplier — scanner findings carry strings
+        # ("high"/"medium"/"low") while the registry carries floats.
+        # A raw string used to crash with
+        # "can't multiply sequence by non-int of type 'float'".
         confidence = finding.get("confidence", 0.5)
+        if isinstance(confidence, str):
+            _map = {"critical": 1.0, "high": 0.9, "medium": 0.6,
+                    "moderate": 0.6, "low": 0.3, "info": 0.2,
+                    "informational": 0.2}
+            confidence = _map.get(confidence.strip().lower(), 0.5)
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = max(0.0, min(1.0, confidence))
         confidence_multiplier = 0.5 + (confidence * 0.5)  # 0.5 to 1.0
-        
+
         # State multiplier
-        state = finding.get("state", "discovered")
+        state = str(finding.get("state", "discovered") or "discovered")
         state_multipliers = {
             "confirmed": 1.5,
             "validating": 1.2,
@@ -1130,10 +1151,12 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         attack_paths: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Build context for AI report generation."""
+        findings = [f for f in (findings or []) if isinstance(f, dict)]
+        evidence = [e for e in (evidence or []) if isinstance(e, dict)]
         return {
             "engagement_name": engagement.get("name", ""),
             "engagement_operator": engagement.get("operator", ""),
-            "target_count": len(engagement.get("in_scope_targets", [])),
+            "target_count": len(engagement.get("in_scope_targets") or []),
             "finding_count": len(findings),
             "evidence_count": len(evidence),
             "severity_breakdown": {
@@ -1176,12 +1199,14 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
             if not data:
                 return []
             statements = []
-            for path in data.get("paths", []):
+            for path in (data.get("paths") or []):
+                if not isinstance(path, dict):
+                    continue
                 statements.append(AIStatement(
                     content=f"AI-identified attack path: {path.get('description', '')}",
                     reasoning_type=AIReasoningType.INFERENCE,
                     confidence=path.get("confidence", 0.7),
-                    evidence_refs=path.get("steps", []),
+                    evidence_refs=path.get("steps", []) or [],
                     source_module="ai_attack_path",
                     metadata={"path": path},
                 ))
@@ -1221,7 +1246,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
             if not data:
                 return []
             statements = []
-            for path in data.get("paths", []):
+            for path in (data.get("paths") or []):
+                if not isinstance(path, dict):
+                    continue
                 statements.append(AIStatement(
                     content=f"AI-enhanced path: {path.get('description', '')}",
                     reasoning_type=AIReasoningType.INFERENCE,
@@ -1261,7 +1288,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
             if not data:
                 return []
             statements = []
-            for corr in data.get("correlations", []):
+            for corr in (data.get("correlations") or []):
+                if not isinstance(corr, dict):
+                    continue
                 statements.append(AIStatement(
                     content=f"AI correlation: {corr.get('reasoning', '')}",
                     reasoning_type=AIReasoningType.INFERENCE,
@@ -1301,7 +1330,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
             if not data:
                 return []
             statements = []
-            for item in data.get("prioritized", []):
+            for item in (data.get("prioritized") or []):
+                if not isinstance(item, dict):
+                    continue
                 statements.append(AIStatement(
                     content=f"AI priority: {item.get('reasoning', '')}",
                     reasoning_type=AIReasoningType.INFERENCE,
@@ -1359,18 +1390,23 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         """
         if not self._enabled or not findings:
             return []
+        findings = [f for f in (findings or []) if isinstance(f, dict)]
+        if not findings:
+            return []
         statements: List[AIStatement] = []
         for offset, batch in _batches(findings, batch_size, max_batches):
             payload = []
             for i, f in enumerate(batch):
+                if not isinstance(f, dict):
+                    continue
                 payload.append({
                     "finding_id": str(offset + i),
-                    "type": f.get("type", ""),
-                    "severity": f.get("severity", ""),
-                    "url": f.get("url", ""),
-                    "description": f.get("description", "")[:400],
-                    "confidence": f.get("confidence", ""),
-                    "state": f.get("state", ""),
+                    "type": f.get("type", "") or "",
+                    "severity": f.get("severity", "") or "",
+                    "url": f.get("url", "") or "",
+                    "description": str(f.get("description", "") or "")[:400],
+                    "confidence": f.get("confidence", "") or "",
+                    "state": f.get("state", "") or "",
                 })
             prompt = self.PROMPTS["triage"].format(
                 findings=self._redacted_for_llm(payload)
@@ -1381,7 +1417,11 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
             data = extract_json(response)
             if not data:
                 continue
-            for verdict in data.get("verdicts", []):
+            if not isinstance(data, dict):
+                continue
+            for verdict in data.get("verdicts", []) or []:
+                if not isinstance(verdict, dict):
+                    continue
                 raw_id = verdict.get("finding_id", "")
                 index = _as_global_index(raw_id, len(findings))
                 v = verdict.get("verdict", "uncertain")
@@ -1409,12 +1449,17 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         """Summarize recon data and suggest next assessment steps."""
         if not self._enabled or not discovery:
             return []
-        recon_payload = {
-            k: discovery.get(k, [])[:30]
-            for k in ("urls", "subdomains", "technologies", "ports",
-                      "emails", "open_ports")
-            if discovery.get(k)
-        }
+        if not isinstance(discovery, dict):
+            return []
+        recon_payload = {}
+        for k in ("urls", "subdomains", "technologies", "ports",
+                  "emails", "open_ports"):
+            try:
+                _v = discovery.get(k)
+            except AttributeError:
+                continue
+            if _v and isinstance(_v, list):
+                recon_payload[k] = _v[:30]
         prompt = self.PROMPTS["recon"].format(
             recon=self._redacted_for_llm(recon_payload)
         )
@@ -1435,16 +1480,17 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 confidence=0.6,
                 source_module="ai_recon",
             ))
-        for obs in data.get("observations", [])[:10]:
+        for obs in (data.get("observations") or [])[:10]:
             statements.append(AIStatement(
-                content=obs,
+                content=str(obs),
                 reasoning_type=AIReasoningType.HYPOTHESIS,
                 confidence=0.5,
                 source_module="ai_recon",
             ))
-        for step in data.get("suggested_steps", [])[:10]:
+        for step in [s for s in (data.get("suggested_steps") or [])[:10]
+                     if isinstance(s, dict)]:
             statements.append(AIStatement(
-                content=step.get("step", ""),
+                content=str(step.get("step", "")),
                 reasoning_type=AIReasoningType.RECOMMENDATION,
                 confidence=0.6,
                 source_module="ai_recon",
@@ -1480,9 +1526,10 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         except json.JSONDecodeError:
             return []
         statements = []
-        for step in data.get("steps", [])[:10]:
+        for step in [s for s in (data.get("steps") or [])[:10]
+                     if isinstance(s, dict)]:
             statements.append(AIStatement(
-                content=step.get("step", ""),
+                content=str(step.get("step", "")),
                 reasoning_type=AIReasoningType.RECOMMENDATION,
                 confidence=0.6,
                 source_module="ai_next_steps",
@@ -1522,7 +1569,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         except json.JSONDecodeError:
             return []
         statements = []
-        for item in data.get("validated_items", []):
+        for item in (data.get("validated_items") or []):
+            if not isinstance(item, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Post-exploitation validation: {item.get('item', '')} - {item.get('status', 'UNKNOWN')}",
                 reasoning_type=AIReasoningType.FACT if item.get("status") == "CONFIRMED" else AIReasoningType.INFERENCE,
@@ -1531,7 +1580,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_post_exploitation_validation",
                 metadata=item,
             ))
-        for hd in data.get("hidden_directory_exploitation", []):
+        for hd in (data.get("hidden_directory_exploitation") or []):
+            if not isinstance(hd, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Hidden directory exploitation: {hd.get('directory', '')}",
                 reasoning_type=AIReasoningType.FACT,
@@ -1540,7 +1591,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_hidden_directory_exploitation",
                 metadata=hd,
             ))
-        for bf in data.get("backup_file_exploitation", []):
+        for bf in (data.get("backup_file_exploitation") or []):
+            if not isinstance(bf, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Backup file exploitation: {bf.get('file', '')} - credentials extracted",
                 reasoning_type=AIReasoningType.FACT,
@@ -1549,7 +1602,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_backup_file_exploitation",
                 metadata=bf,
             ))
-        for mi in data.get("misconfiguration_exploitation", []):
+        for mi in (data.get("misconfiguration_exploitation") or []):
+            if not isinstance(mi, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Misconfiguration exploitation: {mi.get('misconfig', '')} at {mi.get('path', '')}",
                 reasoning_type=AIReasoningType.FACT,
@@ -1583,7 +1638,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         except json.JSONDecodeError:
             return []
         statements = []
-        for hd in data.get("hidden_directories", []):
+        for hd in (data.get("hidden_directories") or []):
+            if not isinstance(hd, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Hidden directory found: {hd.get('path', '')} — {hd.get('what_it_leaks', '')}",
                 reasoning_type=AIReasoningType.FACT,
@@ -1592,7 +1649,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_hidden_directory_discovery",
                 metadata=hd,
             ))
-        for bf in data.get("backup_files", []):
+        for bf in (data.get("backup_files") or []):
+            if not isinstance(bf, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Backup file found: {bf.get('path', '')} — contains plaintext credentials",
                 reasoning_type=AIReasoningType.FACT,
@@ -1601,7 +1660,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_backup_file_discovery",
                 metadata=bf,
             ))
-        for mi in data.get("misconfigurations", []):
+        for mi in (data.get("misconfigurations") or []):
+            if not isinstance(mi, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Misconfiguration found: {mi.get('type', '')} at {mi.get('path', '')}",
                 reasoning_type=AIReasoningType.FACT,
@@ -1639,7 +1700,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         except json.JSONDecodeError:
             return []
         statements = []
-        for mf in data.get("misconfiguration_confirmations", []):
+        for mf in (data.get("misconfiguration_confirmations") or []):
+            if not isinstance(mf, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Misconfiguration confirmed: {mf.get('type', '')} at {mf.get('path', '')}",
                 reasoning_type=AIReasoningType.FACT,
@@ -1648,7 +1711,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_misconfiguration_confirmation",
                 metadata=mf,
             ))
-        for hdc in data.get("hidden_directory_confirmations", []):
+        for hdc in (data.get("hidden_directory_confirmations") or []):
+            if not isinstance(hdc, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Hidden directory confirmed: {hdc.get('path', '')}",
                 reasoning_type=AIReasoningType.FACT,
@@ -1657,7 +1722,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_hidden_directory_confirmation",
                 metadata=hdc,
             ))
-        for bfc in data.get("backup_file_confirmations", []):
+        for bfc in (data.get("backup_file_confirmations") or []):
+            if not isinstance(bfc, dict):
+                continue
             statements.append(AIStatement(
                 content=f"Backup file confirmed: {bfc.get('path', '')}",
                 reasoning_type=AIReasoningType.FACT,
@@ -1666,7 +1733,9 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 source_module="ai_backup_file_confirmation",
                 metadata=bfc,
             ))
-        for vf in data.get("validated_findings", []):
+        for vf in (data.get("validated_findings") or []):
+            if not isinstance(vf, dict):
+                continue
             if vf.get("status") == "CONFIRMED_TRUE_POSITIVE":
                 statements.append(AIStatement(
                     content=f"Confirmed: {vf.get('type', '')} at {vf.get('url', '')}",
@@ -1823,7 +1892,9 @@ Return ONLY valid JSON."""
             if not data:
                 continue
 
-            for v in data.get("validated_findings", []):
+            for v in (data.get("validated_findings") or []):
+                if not isinstance(v, dict):
+                    continue
                 verdict = v.get("verdict", "uncertain")
                 confidence = float(v.get("confidence", 0.5))
                 # Providers are inconsistent: the prompt asks for

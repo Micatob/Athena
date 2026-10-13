@@ -20,6 +20,43 @@ class CVEResult:
     exploit_source: Optional[str] = None
     remediation: Optional[str] = None
 
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "cve_id": self.cve_id,
+            "description": self.description,
+            "cvss_score": self.cvss_score,
+            "cvss_vector": self.cvss_vector,
+            "exploit_available": self.exploit_available,
+            "exploit_source": self.exploit_source,
+            "remediation": self.remediation,
+        }
+        # KEV annotation and other enrichment attach dynamic attributes;
+        # round-trip them so a resumed run loses nothing.
+        for key in ("kev", "kev_due_date", "kev_name"):
+            if hasattr(self, key):
+                data[key] = getattr(self, key)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "CVEResult":
+        data = data if isinstance(data, dict) else {}
+        obj = cls(
+            cve_id=str(data.get("cve_id", "") or ""),
+            description=str(data.get("description", "") or ""),
+            cvss_score=data.get("cvss_score"),
+            cvss_vector=data.get("cvss_vector"),
+            exploit_available=bool(data.get("exploit_available", False)),
+            exploit_source=data.get("exploit_source"),
+            remediation=data.get("remediation"),
+        )
+        for key in ("kev", "kev_due_date", "kev_name"):
+            if key in data:
+                try:
+                    setattr(obj, key, data[key])
+                except Exception:
+                    pass
+        return obj
+
 
 @dataclass
 class VersionCVEResult:
@@ -28,6 +65,49 @@ class VersionCVEResult:
     confidence: int
     cves: List[CVEResult] = field(default_factory=list)
     max_cvss: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "technology": self.technology,
+            "version": self.version,
+            "confidence": self.confidence,
+            "cves": [c.to_dict() if hasattr(c, "to_dict") else {}
+                     for c in (self.cves or [])],
+            "max_cvss": self.max_cvss,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "VersionCVEResult":
+        data = data if isinstance(data, dict) else {}
+        return cls(
+            technology=str(data.get("technology", "") or ""),
+            version=str(data.get("version", "") or ""),
+            confidence=int(data.get("confidence", 0) or 0),
+            cves=[CVEResult.from_dict(c) for c in (data.get("cves") or [])
+                  if isinstance(c, dict)],
+            max_cvss=data.get("max_cvss"),
+        )
+
+
+def cve_results_to_json(results: Any) -> List[Dict[str, Any]]:
+    """Serialize CVE mapping results for checkpoints (objects or dicts)."""
+    out: List[Dict[str, Any]] = []
+    for item in results or []:
+        if hasattr(item, "to_dict"):
+            try:
+                out.append(item.to_dict())
+                continue
+            except Exception:
+                pass
+        if isinstance(item, dict):
+            out.append(dict(item))
+    return out
+
+
+def cve_results_from_json(data: Any) -> List[VersionCVEResult]:
+    """Restore CVE mapping results saved by :func:`cve_results_to_json`."""
+    return [VersionCVEResult.from_dict(item) for item in (data or [])
+            if isinstance(item, dict)]
 
 
 CURATED_DB: Dict[str, Dict[str, List[Tuple[str, str, float, bool]]]] = {
@@ -324,23 +404,34 @@ class CVEMapper:
     @staticmethod
     def _parse_nvd_items(data: Optional[Dict[str, Any]]) -> List[CVEResult]:
         results: List[CVEResult] = []
-        for item in (data or {}).get('vulnerabilities', []):
-            cve = item.get('cve', {})
-            cve_id = cve.get('id', '')
+        if not isinstance(data, dict):
+            return results
+        for item in (data.get('vulnerabilities', []) or []):
+            if not isinstance(item, dict):
+                continue
+            cve = item.get('cve') or {}
+            if not isinstance(cve, dict):
+                continue
+            cve_id = cve.get('id', '') or ''
             if not cve_id:
                 continue
-            descriptions = cve.get('descriptions', [])
+            descriptions = cve.get('descriptions', []) or []
+            if not isinstance(descriptions, list):
+                descriptions = []
             desc = next((d.get('value', '') for d in descriptions
-                         if d.get('lang') == 'en'), '')
+                         if isinstance(d, dict) and d.get('lang') == 'en'), '')
             score = None
-            metrics = cve.get('metrics', {})
+            metrics = cve.get('metrics') or {}
+            if not isinstance(metrics, dict):
+                metrics = {}
             for key in ('cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2'):
                 entries = metrics.get(key)
-                if entries:
-                    score = (entries[0].get('cvssData', {}) or {}).get('baseScore')
+                if entries and isinstance(entries, list) and entries:
+                    first = entries[0] if isinstance(entries[0], dict) else {}
+                    score = (first.get('cvssData') or {}).get('baseScore') if isinstance(first.get('cvssData') or {}, dict) else None
                     if score is not None:
                         break
-            results.append(CVEResult(cve_id=cve_id, description=desc[:300],
+            results.append(CVEResult(cve_id=cve_id, description=str(desc or '')[:300],
                                      cvss_score=score))
         return results
 

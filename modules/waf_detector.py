@@ -171,13 +171,14 @@ async def _detect_inner(target: str, session: aiohttp.ClientSession,
             probe_results.append(await _fetch(session, base + probe))
 
         sig_hits = _match_signatures(
-            baseline.get('headers', {}),
-            baseline.get('body', ''),
-            (baseline.get('headers', {}) or {}).get('Server', ''),
+            baseline.get('headers') or {},
+            baseline.get('body') or '',
+            (baseline.get('headers') or {}).get('Server', ''),
         )
         for pr in probe_results:
-            sig_hits.extend(_match_signatures(pr.get('headers', {}), pr.get('body', ''),
-                                              pr.get('headers', {}).get('Server', '')))
+            _h = pr.get('headers') or {}
+            sig_hits.extend(_match_signatures(_h, pr.get('body') or '',
+                                              _h.get('Server', '')))
 
         # Dedupe by WAF name
         seen = set()

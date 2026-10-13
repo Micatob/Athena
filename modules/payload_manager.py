@@ -531,8 +531,8 @@ class PayloadManager:
     def get_all_profiles(self, vuln_type: str) -> List[str]:
         """Return the list of available profile names for *vuln_type*."""
         key = vuln_type.upper()
-        profiles = set(self._registry.get(key, {}).keys())
-        profiles.update(self._custom.get(key, {}).keys())
+        profiles = set((self._registry.get(key) or {}).keys())
+        profiles.update((self._custom.get(key) or {}).keys())
         return sorted(profiles)
 
     def list_categories(self) -> List[str]:
@@ -567,7 +567,7 @@ class PayloadManager:
 
         logger.info(
             'Registered custom payload for %s/%s (total custom: %d)',
-            key, profile, len(self._custom.get(key, {}).get(profile, [])),
+            key, profile, len((self._custom.get(key) or {}).get(profile, []) or []),
         )
 
     def load_custom_payloads(self, path: str) -> int:

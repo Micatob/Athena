@@ -406,7 +406,9 @@ class ReportGenerator:
         """Generate comprehensive penetration test report with professional auditor focus."""
         # Filter and deduplicate vulnerabilities
         results = results if isinstance(results, dict) else {}
-        all_vulns = results.get('vulnerabilities', [])
+        all_vulns = results.get('vulnerabilities', []) or []
+        if not isinstance(all_vulns, list):
+            all_vulns = []
         deduped_vulns = self._dedup_vulnerabilities(all_vulns)
         filtered_vulns = deduped_vulns[:self.MAX_REPORT_FINDINGS]
 
@@ -430,7 +432,9 @@ class ReportGenerator:
         # Group by vulnerability type
         vulns_by_type = {}
         for v in filtered_vulns:
-            vtype = v.get('type', 'Unknown')
+            if not isinstance(v, dict):
+                continue
+            vtype = v.get('type', 'Unknown') or 'Unknown'
             if vtype not in vulns_by_type:
                 vulns_by_type[vtype] = []
             vulns_by_type[vtype].append(v)
@@ -439,10 +443,20 @@ class ReportGenerator:
         exploitation_attempts = list(results.get('exploitation') or [])
         unique_exploits = self._deduplicate_exploitation_results(exploitation_attempts)
         exploit_counts = {'confirmed': 0, 'possible': 0, 'inconclusive': 0}
+        proof_counts: Dict[str, int] = {}
         for attempt in exploitation_attempts:
-            key = str(attempt.get('status', '')).lower() if isinstance(attempt, dict) else ''
+            if not isinstance(attempt, dict):
+                continue
+            key = str(attempt.get('status', '')).lower()
             if key in exploit_counts:
                 exploit_counts[key] += 1
+            proof = str(attempt.get('proof_kind') or 'none').lower()
+            proof_counts[proof] = proof_counts.get(proof, 0) + 1
+
+        # Cross-tool correlation stats (native + nuclei merge).
+        correlation = results.get('correlation')
+        if not isinstance(correlation, dict):
+            correlation = {}
         
         # Generate detailed analysis
         vulnerability_details = self._generate_vulnerability_details(filtered_vulns)
@@ -488,16 +502,19 @@ class ReportGenerator:
                 'info': len(info_vulns)
             },
             'assets_discovered': {
-                'urls': len(discovery.get('urls', [])),
-                'subdomains': len(discovery.get('subdomains', [])),
-                'open_ports': len(discovery.get('ports', [])),
-                'technologies': len(discovery.get('technologies', []))
+                'urls': len(discovery.get('urls') or []),
+                'subdomains': len(discovery.get('subdomains') or []),
+                'open_ports': len(discovery.get('ports') or []),
+                'technologies': len(discovery.get('technologies') or [])
             },
             'successful_demonstrations': len(unique_exploits),
             'exploitation_attempted': len(exploitation_attempts),
             'exploitation_confirmed': exploit_counts['confirmed'],
             'exploitation_possible': exploit_counts['possible'],
             'exploitation_inconclusive': exploit_counts['inconclusive'],
+            'exploitation_by_proof': proof_counts,
+            'corroborated_findings': int(correlation.get('corroborated', 0) or 0),
+            'tool_only_findings': int(correlation.get('tool_only', 0) or 0),
             'risk_rating': self._calculate_overall_risk(
                 critical_vulns, high_vulns, medium_vulns),
             'raw_finding_count': len(all_vulns),
@@ -525,20 +542,20 @@ class ReportGenerator:
                 'audit_summary': summary,
                 'discovery_findings': {
                     'ran': self._discovery_ran(discovery),
-                    'technologies': discovery.get('technologies', []),
-                    'technologies_with_confidence': discovery.get('technologies_with_confidence', []),
-                    'open_ports': discovery.get('ports', []),
-                    'urls': discovery.get('urls', []),
-                    'subdomains': discovery.get('subdomains', []),
-                    'admin_panels': discovery.get('admin_panels', []),
-                    'login_forms': discovery.get('login_forms', []),
-                    'waf': discovery.get('waf', {}),
+                    'technologies': discovery.get('technologies') or [],
+                    'technologies_with_confidence': discovery.get('technologies_with_confidence') or [],
+                    'open_ports': discovery.get('ports') or [],
+                    'urls': discovery.get('urls') or [],
+                    'subdomains': discovery.get('subdomains') or [],
+                    'admin_panels': discovery.get('admin_panels') or [],
+                    'login_forms': discovery.get('login_forms') or [],
+                    'waf': discovery.get('waf') or {},
                 },
                 'no_vulnerabilities_found': no_findings,
-                'tech_stack_hardening': self.generate_tech_suggestions(discovery.get('technologies', []), discovery.get('technologies_with_confidence', [])),
-                'cve_intelligence': self.generate_cve_lookup(discovery.get('technologies', []), discovery.get('technologies_with_confidence', [])),
-                'cve_mapping': results.get('cve_mapping', []),
-                'external_tools': results.get('external_tools', []),
+                'tech_stack_hardening': self.generate_tech_suggestions(discovery.get('technologies') or [], discovery.get('technologies_with_confidence') or []),
+                'cve_intelligence': self.generate_cve_lookup(discovery.get('technologies') or [], discovery.get('technologies_with_confidence') or []),
+                'cve_mapping': results.get('cve_mapping', []) or [],
+                'external_tools': results.get('external_tools', []) or [],
                 'detailed_analysis': vulnerability_details,
                 'demonstrated_impact': unique_exploits,
                 'exploitation_attempts': exploitation_attempts,
@@ -1158,15 +1175,16 @@ class ReportGenerator:
                 '2.20.0': ['CVE-2020-27847 - DoS via crafted query'],
             },
         }
+        version = str(version or '')
         # Exact match first
-        result = known_vulns.get(name_lower, {}).get(version)
+        result = (known_vulns.get(name_lower) or {}).get(version)
         if result:
             return result
         # Try major.minor match (e.g., "8.0" matches "8.0.0")
         parts = version.split('.')
         if len(parts) >= 2:
             major_minor = '.'.join(parts[:2])
-            result = known_vulns.get(name_lower, {}).get(major_minor)
+            result = (known_vulns.get(name_lower) or {}).get(major_minor)
             if result:
                 return result
         return None
@@ -1199,7 +1217,7 @@ class ReportGenerator:
                         if not isinstance(d, dict):
                             continue
                         if d.get('lang') == 'en':
-                            description = d.get('value', '')[:120]
+                            description = str(d.get('value') or '')[:120]
                             break
                     if cve_id:
                         results.append(f"{cve_id} - {description}" if description else cve_id)
@@ -1370,8 +1388,12 @@ class ReportGenerator:
                 'verification_status': vstat,
                 'confidence': str(vuln.get('confidence', 'medium' if verified else 'low')),
                 'evidence': ev_str,
-                'verification_detail': (verification.get('evidence', {}).get('description', '')
-                                        if isinstance(verification, dict) else ''),
+                'verification_detail': (
+                    ((verification.get('evidence') or {}).get('description', '')
+                     if isinstance(verification.get('evidence'), dict)
+                     else (str(verification.get('evidence') or '')
+                           if verification.get('evidence') else ''))
+                    if isinstance(verification, dict) else ''),
             })
 
         return details
@@ -1498,9 +1520,12 @@ class ReportGenerator:
         """Map vulnerabilities to GDPR/PCI-DSS compliance frameworks."""
         gdpr_issues = []
         pci_issues = []
-        
-        for v in vulnerabilities:
-            vtype = v.get('type', '')
+        results = results if isinstance(results, dict) else {}
+
+        for v in vulnerabilities or []:
+            if not isinstance(v, dict):
+                continue
+            vtype = v.get('type', '') or ''
             if any(k in vtype for k in ['XSS', 'Injection', 'Authentication']):
                 gdpr_issues.append(f"Art 32: Inadequate technical measures to protect data integrity ({vtype})")
             
@@ -1510,8 +1535,8 @@ class ReportGenerator:
                 pci_issues.append(f"Req 8.2: Weak authentication/password management")
                 
         # Check for encrypted communication
-        target = results.get('target', '')
-        if target.startswith('http://'):
+        target = results.get('target', '') or ''
+        if isinstance(target, str) and target.startswith('http://'):
             gdpr_issues.append("Art 32: Data transmitted in cleartext (HTTP)")
             pci_issues.append("Req 4.1: Use strong cryptography for sensitive data transmit")
 
@@ -1621,9 +1646,14 @@ class ReportGenerator:
 
     def generate_offensive_guide(self, results: Dict[str, Any]) -> str:
         """Generate a markdown guide on next offensive testing steps based on findings."""
-        target = results.get('target', 'Unknown')
-        vulns = results.get('vulnerabilities', [])
-        discovery = results.get('discovery', {})
+        results = results if isinstance(results, dict) else {}
+        target = results.get('target', 'Unknown') or 'Unknown'
+        if not isinstance(target, str):
+            target = str(target)
+        vulns = results.get('vulnerabilities', []) or []
+        discovery = results.get('discovery', {}) or {}
+        if not isinstance(discovery, dict):
+            discovery = {}
         target_domain = target.replace('https://', '').replace('http://', '').split('/')[0].split(':')[0]
 
         md = [f"# Next Steps Guide: {target}", ""]
@@ -1634,12 +1664,14 @@ class ReportGenerator:
         # ------------------------------------------------------------------
         # 1. Admin Panels & High-Value Targets (cPanel, Webmail, WHM)
         # ------------------------------------------------------------------
-        admin_panels = discovery.get('admin_panels', [])
+        admin_panels = discovery.get('admin_panels', []) or []
         if admin_panels:
             md.append("## 1. HIGH-VALUE TARGETS: Admin Panels & Webmail")
             md.append("**These are priority targets - compromise here gives admin access:**")
             md.append("")
             for panel in admin_panels:
+                if not isinstance(panel, dict):
+                    continue
                 panel_type = panel.get('panel_type', 'UNKNOWN')
                 url = panel.get('url', '')
                 status = panel.get('status', '')
@@ -1670,16 +1702,19 @@ class ReportGenerator:
         # ------------------------------------------------------------------
         # 2. Credential Bruteforcing / Spraying
         # ------------------------------------------------------------------
-        login_forms = discovery.get('login_forms', [])
+        login_forms = discovery.get('login_forms', []) or []
         if login_forms:
             md.append("## 2. Credential Bruteforcing / Spraying")
             md.append("Login forms were discovered. Follow these steps to attempt credential attacks:")
             md.append("")
             for i, form in enumerate(login_forms, 1):
-                form_url = form.get('url', '')
+                if not isinstance(form, dict):
+                    continue
+                form_url = form.get('url', '') or ''
                 form_type = form.get('form_type', 'unknown')
                 source = form.get('source', '')
-                inputs = [inp.get('name') for inp in form.get('inputs', []) if inp.get('name')]
+                inputs = [inp.get('name') for inp in (form.get('inputs', []) or [])
+                          if isinstance(inp, dict) and inp.get('name')]
                 priority = form.get('priority', 'medium')
                 
                 md.append(f"### Target {i}: `{form_url}`")
@@ -1725,13 +1760,15 @@ class ReportGenerator:
         # ------------------------------------------------------------------
         # 3. Subdomain Enumeration & Review
         # ------------------------------------------------------------------
-        subdomains = discovery.get('subdomains', [])
+        subdomains = discovery.get('subdomains', []) or []
+        if not isinstance(subdomains, list):
+            subdomains = []
+        subdomains = [s for s in subdomains if isinstance(s, str) and s]
         if subdomains:
             md.append("## 3. Subdomain Enumeration & Review")
             md.append("The following subdomains were discovered. Investigate each with these steps:")
             md.append("")
             for sub in subdomains[:10]:
-                sub_clean = sub.replace('https://', '').replace('http://', '').split('/')[0]
                 md.append(f"- `{sub}`")
             if len(subdomains) > 10:
                 md.append(f"- ... and {len(subdomains)-10} more.")
@@ -1774,8 +1811,19 @@ class ReportGenerator:
         # ------------------------------------------------------------------
         # 4. Port Scanning & Service Enumeration
         # ------------------------------------------------------------------
-        open_ports = discovery.get('ports', [])
-        if open_ports:
+        open_ports = discovery.get('ports', []) or []
+        if not isinstance(open_ports, list):
+            open_ports = []
+        # Normalize: ports may be ints or dicts with a 'port' key.
+        ports: list = []
+        for _p in open_ports:
+            if isinstance(_p, int):
+                ports.append(_p)
+            elif isinstance(_p, dict) and isinstance(_p.get('port'), int):
+                ports.append(_p.get('port'))
+            elif isinstance(_p, str) and _p.isdigit():
+                ports.append(int(_p))
+        if ports:
             md.append("## 4. Port Scanning & Service Enumeration")
             md.append("The following open ports were detected. Perform deep reconnaissance on each:")
             md.append("")
@@ -1845,8 +1893,14 @@ class ReportGenerator:
         # ------------------------------------------------------------------
         # 5. Source Code Analysis (Secrets & Comments)
         # ------------------------------------------------------------------
-        secrets = discovery.get('source_analysis', {}).get('secrets', [])
-        comments = discovery.get('source_analysis', {}).get('comments', [])
+        secrets = (discovery.get('source_analysis') or {}).get('secrets', []) or []
+        comments = (discovery.get('source_analysis') or {}).get('comments', []) or []
+        if not isinstance(secrets, list):
+            secrets = []
+        if not isinstance(comments, list):
+            comments = []
+        secrets = [s for s in secrets if isinstance(s, dict)]
+        comments = [c for c in comments if isinstance(c, (dict, str))]
         if secrets or comments:
             md.append("## 5. Source Code Analysis")
             if secrets:
@@ -1864,7 +1918,7 @@ class ReportGenerator:
                 md.append("")
                 md.append("1. **Fetch the full file** with curl and grep for secrets:")
                 md.append("   ```bash")
-                md.append(f"   curl -s \"{secrets[0].get('file', target)}\" | grep -Eoi '(api[Kk]ey|[Aa]ccess[Kk]ey|[Ss]ecret|[Tt]oken|password|auth|jwt|bearer)' | sort -u")
+                md.append(f"   curl -s \"{(secrets[0].get('file', target) if isinstance(secrets[0], dict) else target)}\" | grep -Eoi '(api[Kk]ey|[Aa]ccess[Kk]ey|[Ss]ecret|[Tt]oken|password|auth|jwt|bearer)' | sort -u")
                 md.append("   ```")
                 md.append("")
                 md.append("2. **Decode base64-encoded secrets** if found:")
@@ -1893,9 +1947,12 @@ class ReportGenerator:
                 md.append("### Interesting Source Code Comments")
                 md.append("The following comments may reveal sensitive functionality or debug endpoints:")
                 for comment in comments[:10]:
-                    md.append(f"- **Type**: `{comment.get('type')}`")
-                    md.append(f"  - **File**: `{comment.get('file')}`")
-                    md.append(f"  - **Text**: `{comment.get('text')}`")
+                    if isinstance(comment, dict):
+                        md.append(f"- **Type**: `{comment.get('type')}`")
+                        md.append(f"  - **File**: `{comment.get('file')}`")
+                        md.append(f"  - **Text**: `{comment.get('text')}`")
+                    else:
+                        md.append(f"- `{comment}`")
                 if len(comments) > 10:
                     md.append(f"- ... and {len(comments)-10} more comments.")
                 md.append("")
@@ -1903,7 +1960,8 @@ class ReportGenerator:
                 md.append("")
                 md.append("1. **Fetch and extract comments** from the source file:")
                 md.append("   ```bash")
-                md.append(f"   curl -s \"{comments[0].get('file', target)}\" | grep -E '(TODO|FIXME|HACK|BUG|XXX|NOTE|REVIEW|OPTIMIZE|CHANGE)'")
+                _cf = (comments[0].get('file', target) if isinstance(comments[0], dict) else target)
+                md.append(f"   curl -s \"{_cf}\" | grep -E '(TODO|FIXME|HACK|BUG|XXX|NOTE|REVIEW|OPTIMIZE|CHANGE)'")
                 md.append("   ```")
                 md.append("")
                 md.append("2. **Probe discovered paths** from comments with curl:")
@@ -1916,13 +1974,15 @@ class ReportGenerator:
         # ------------------------------------------------------------------
         # 6. Vulnerability Exploitation
         # ------------------------------------------------------------------
-        critical_vulns = [v for v in vulns if v.get('severity') == 'CRITICAL']
-        high_vulns = [v for v in vulns if v.get('severity') == 'HIGH']
-        
+        critical_vulns = [v for v in (vulns or []) if isinstance(v, dict) and v.get('severity') == 'CRITICAL']
+        high_vulns = [v for v in (vulns or []) if isinstance(v, dict) and v.get('severity') == 'HIGH']
+
         if critical_vulns or high_vulns:
             md.append("## 6. Vulnerability Exploitation")
             for vuln in critical_vulns + high_vulns:
-                vtype = vuln.get('type', '')
+                if not isinstance(vuln, dict):
+                    continue
+                vtype = vuln.get('type', '') or ''
                 url = vuln.get('url', '')
                 md.append(f"### {vtype} at `{url}`")
                 md.append("")
