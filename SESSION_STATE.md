@@ -735,3 +735,58 @@ criteria). Do NOT start B or C until the operator says so.
 - **C = Operations:** SQLite store, scan queue, exports, API mode.
 - Constraints carry over: safe-mode semantics unchanged, no new hard
   dependencies, B/C scope bans still apply in reverse (don't regress A).
+
+---
+
+# Athena Session - 2026-10-13, part 2 (Prompt B IN PROGRESS)
+
+## Status: CODE + TESTS DONE, UNCOMMITTED — 989 passed, 1 skipped
+
+### New modules
+- `modules/auth_session.py` — one-shot form login (POST response, then
+  cookie-replaying GETs), `AuthContext` (cookies/headers, `seed_session()`,
+  secret-free `summary()`), `resolve_auth_args()` (flags + `ATHENA_AUTH_*`
+  env). Password never stored/logged/checkpointed. GET-form logins refused.
+- `modules/headless_crawl.py` — Playwright Chromium, same-scope bound,
+  max-pages cap, link+form extraction, auth cookie replay, lazy import,
+  clean `skipped` when Playwright/browsers missing. Injectable
+  `page_source` for tests.
+- `requirements.txt`: `playwright>=1.40.0` (optional). Operator still must
+  run `playwright install chromium` once (binaries absent on this box).
+
+### Wiring (`athena.py`)
+- Pre-discovery login when `--auth-login-url` + creds are explicit;
+  else form-derived login after discovery; resume always re-logs in
+  (sessions are in-memory) but never re-crawls headless.
+- `run_discovery/run_vuln_scan/run_auto_exploitation` + constructors of
+  `DiscoveryModule/VulnerabilityScanner/ExploitationModule/
+  ExploitationRunner` accept `auth=` (all defaults None). Bruteforce
+  deliberately NOT seeded (clean jar required for its session check).
+- `run_coverage_stage()` merges headless URLs into discovery + re-saves
+  the discovery checkpoint (resume stays byte-identical).
+- CLI group `Coverage (Prompt B)`: `--no-headless --crawl-max-pages
+  --auth-login-url --auth-user --auth-pass --auth-verify`.
+- Report: summary keys `auth_authenticated/auth_login_url/
+  headless_status/headless_pages_visited/headless_urls_found/
+  headless_urls_added/headless_forms_found` + HTML "Coverage" section.
+
+### Real bug found by the live probe (fixed)
+- aiohttp's default `CookieJar` **silently drops cookies set by bare-IP
+  hosts** (`not unsafe and is_ip_address -> return`). All auth-path
+  sessions (auth transports, discovery, scanner, exploitation,
+  bruteforce) now use `CookieJar(unsafe=True)`. `seed_session()` verifies
+  by re-reading the jar and returns the truly stored count.
+- Live proof: local login server → verified session → seeded jar passes
+  the server's own cookie gate (`probe_b.py` in temp dir, not committed).
+
+### Tests (no browser, no network)
+- `tests/test_auth_session.py` (17), `tests/test_headless_crawl.py`
+  (13 + 3 coverage-stage tests incl. secret-free checkpoint assertion).
+- `tests/test_light_recon.py`: recorder doubles accept the new `auth`
+  kwarg + new forwarding test.
+- Full suite: **989 passed, 1 skipped**.
+
+## NEXT
+1. Decide commit/push of Prompt B (operator call).
+2. Optional: `playwright install chromium` on this box for live headless.
+3. Then Prompt C (SQLite store, queue, exports, API mode).

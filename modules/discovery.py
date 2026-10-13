@@ -63,8 +63,12 @@ class DiscoveryModule:
         'security_endpoints', 'admin_panels',
     )
 
-    def __init__(self) -> None:
+    def __init__(self, auth=None) -> None:
         self._session: Optional[aiohttp.ClientSession] = None
+        #: Proven login session (AuthContext) - cookies seed the jar and
+        #: header auth merges into session defaults, so every discovery
+        #: request below transparently reuses the login.  None = anonymous.
+        self._auth = auth
         self.discovered_urls: Set[str] = set()
         self.discovered_subdomains: Set[str] = set()
         self.technologies: Set[str] = set()
@@ -120,15 +124,32 @@ class DiscoveryModule:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             conn = aiohttp.TCPConnector(ssl=False)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+            }
+            auth = getattr(self, '_auth', None)
+            try:
+                if auth is not None and getattr(auth, 'authenticated', False):
+                    for k, v in (getattr(auth, 'headers', None) or {}).items():
+                        headers[str(k)] = str(v)
+            except Exception:
+                pass
             self._session = aiohttp.ClientSession(
                 connector=conn,
                 timeout=aiohttp.ClientTimeout(total=10),
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-                }
+                headers=headers,
+                # unsafe jar: IP targets set cookies too and the default
+                # jar silently drops them (breaks auth seeding + login
+                # detection on bare-IP hosts).
+                cookie_jar=aiohttp.CookieJar(unsafe=True),
             )
+            try:
+                if auth is not None:
+                    auth.seed_session(self._session)
+            except Exception:
+                pass
         return self._session
 
     async def close(self) -> None:

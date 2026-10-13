@@ -43,7 +43,10 @@ class BruteforceModule:
             headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             },
-            connector=aiohttp.TCPConnector(ssl=False)
+            connector=aiohttp.TCPConnector(ssl=False),
+            # unsafe jar: the session re-check below depends on cookies
+            # even when the target is a bare IP (default jar drops those).
+            cookie_jar=aiohttp.CookieJar(unsafe=True),
         )
         self.logger = logging.getLogger(__name__)
 

@@ -515,6 +515,16 @@ class ReportGenerator:
             'exploitation_by_proof': proof_counts,
             'corroborated_findings': int(correlation.get('corroborated', 0) or 0),
             'tool_only_findings': int(correlation.get('tool_only', 0) or 0),
+            'auth_authenticated': bool((discovery.get('auth') or {}).get('authenticated', False))
+            if isinstance(discovery.get('auth'), dict) else False,
+            'auth_login_url': str((discovery.get('auth') or {}).get('login_url') or '')
+            if isinstance(discovery.get('auth'), dict) else '',
+            'headless_status': str((discovery.get('headless') or {}).get('status') or 'skipped')
+            if isinstance(discovery.get('headless'), dict) else 'skipped',
+            'headless_pages_visited': int((discovery.get('headless') or {}).get('pages_visited', 0) or 0),
+            'headless_urls_found': int((discovery.get('headless') or {}).get('urls_found', 0) or 0),
+            'headless_urls_added': int((discovery.get('headless') or {}).get('urls_added', 0) or 0),
+            'headless_forms_found': int((discovery.get('headless') or {}).get('forms_found', 0) or 0),
             'risk_rating': self._calculate_overall_risk(
                 critical_vulns, high_vulns, medium_vulns),
             'raw_finding_count': len(all_vulns),

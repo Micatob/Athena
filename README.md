@@ -236,6 +236,17 @@ GEMINI_API_KEY=your_gemini_key
 
 Each provider ships its own default model (`gemini-flash-latest`, `openai/gpt-oss-120b`, `deepseek-chat`). `ATHENA_AI_MODEL` applies **only** to `ATHENA_AI_PROVIDER`'s backend - a model id for one vendor would 404 on another and silently disable failover. For a specific backend use `ATHENA_AI_MODEL_GEMINI`, `ATHENA_AI_MODEL_GROQ` or `ATHENA_AI_MODEL_DEEPSEEK`. When no key is configured every AI method returns `[]` gracefully.
 
+### 3b. Coverage: authenticated scanning & headless crawl
+
+```powershell
+pip install playwright; playwright install chromium   # once, for the headless crawl
+python athena.py -t TARGET --auth-user op --auth-pass s3cret --auth-login-url https://target/login
+```
+
+- `--auth-user/--auth-pass` (+ optional `--auth-login-url`, else the first discovered login form): exactly **one** login attempt, session verified by logged-in markers before use; every later stage (crawl, vuln scan, exploitation) reuses it. Without credentials the scan runs anonymously as before. Env fallback: `ATHENA_AUTH_LOGIN_URL/USER/PASS/VERIFY`.
+- `--no-headless` / `--crawl-max-pages N` (default 30): headless Chromium renders JS-heavy pages the static crawler can't see; found URLs feed the scanner automatically. Skips cleanly when Playwright/Chromium is missing.
+- Passwords are never logged, checkpointed, or reported - only the login URL and verification result persist.
+
 ### 4. Output formats (`-o` / `--output`)
 
 `html` *(default)*, `json`, `csv`, `pdf`, or `all`. Reports are written to `report_<target>.*` in the project root, or to a custom path with `--export <path>`.

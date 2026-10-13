@@ -23,6 +23,8 @@ from modules.protocol_scanner import SMBEnumerator, SNMPEnumerator, SMTPEnumerat
 from modules.cve_mapper import CVEMapper, VersionCVEResult
 from modules.checkpoint import CheckpointManager
 from modules.correlation import correlate_tool_findings, is_tool_finding
+from modules.auth_session import AuthContext, login_with_credentials, resolve_auth_args
+from modules.headless_crawl import HeadlessConfig, HeadlessResult, headless_crawl
 from modules.plugin_system import PluginLoader
 from modules.operations_guide import show_guide, generate_guide_json
 from modules.orchestration import (
@@ -206,6 +208,30 @@ Examples:
                                   help='Allow OOB via third-party collectors (interactsh '
                                        'public server, webhook.site). Without this flag '
                                        'only operator-owned/local channels are used')
+
+    coverage_group = parser.add_argument_group('Coverage (Prompt B)')
+    coverage_group.add_argument('--no-headless', action='store_true',
+                                help='Skip the headless-browser crawl (runs '
+                                     'automatically when Playwright + Chromium '
+                                     'are installed)')
+    coverage_group.add_argument('--crawl-max-pages', type=int, default=30,
+                                help='Max pages the headless crawl visits '
+                                     'per target (default: 30)')
+    coverage_group.add_argument('--auth-login-url',
+                                help='Login page URL for authenticated scanning '
+                                     '(default: first discovered login form). '
+                                     'Env: ATHENA_AUTH_LOGIN_URL')
+    coverage_group.add_argument('--auth-user',
+                                help='Username for the single authenticated login. '
+                                     'Env: ATHENA_AUTH_USER')
+    coverage_group.add_argument('--auth-pass',
+                                help='Password for the single authenticated login '
+                                     '(one attempt only, never stored or logged). '
+                                     'Env: ATHENA_AUTH_PASS')
+    coverage_group.add_argument('--auth-verify',
+                                help='Extra comma-separated markers proving login '
+                                     '(default: logout/dashboard detection). '
+                                     'Env: ATHENA_AUTH_VERIFY')
 
     tool_group = parser.add_argument_group('External Tools')
     tool_group.add_argument('--no-nuclei', action='store_true',
@@ -406,11 +432,11 @@ class ProgressBar:
 async def run_discovery(target: str, output_format: str = 'html',
                         scan_types: List[str] = None, ports: List[int] = None,
                         concurrent: int = 200, rate: int = 1000, jitter: int = 0,
-                        stages: List[str] = None) -> Dict[str, Any]:
+                        stages: List[str] = None, auth: AuthContext = None) -> Dict[str, Any]:
     title = ('DISCOVERY & RECONNAISSANCE'
              if stages is None else 'RECONNAISSANCE (light)')
     con.phase(f"PHASE 1: {title}")
-    discovery = DiscoveryModule()
+    discovery = DiscoveryModule(auth=auth)
     try:
         results = await discovery.run(target, stages=stages)
         cprint(f"  [+] Harvesting emails...")
@@ -688,7 +714,8 @@ async def run_vuln_scan(target: str, urls: List[str] = None,
                           stealth: bool = False,
                           waf_info: Dict[str, Any] = None,
                           resume_completed: Set[str] = None,
-                          progress_cb=None) -> List[Dict[str, Any]]:
+                          progress_cb=None,
+                          auth: AuthContext = None) -> List[Dict[str, Any]]:
     con.phase("PHASE 2: VULNERABILITY SCANNING")
     if waf_info and str(waf_info.get('verdict', '')) in ('confirmed', 'likely', 'hard-block'):
         cprint(f"  [*] Vuln scan WAF-aware: {waf_info.get('waf','WAF')} "
@@ -698,7 +725,8 @@ async def run_vuln_scan(target: str, urls: List[str] = None,
         if not target.startswith(('http://', 'https://')):
             target = f"https://{target}"
         urls = [target.rstrip('/') + '/']
-    scanner = VulnerabilityScanner(stealth_mode=stealth, waf_info=waf_info)
+    scanner = VulnerabilityScanner(stealth_mode=stealth, waf_info=waf_info,
+                                   auth=auth)
     try:
         results = await scanner.scan_all(urls, skip_urls=resume_completed,
                                          progress_cb=progress_cb)
@@ -1855,6 +1883,28 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
     exploit handler, or exploitation was disabled/not authorized for this
     target. Findings below are scanner detections only.</em></p>"""
 
+    coverage_section = ''
+    _authed = bool(summary.get('auth_authenticated', False))
+    _hstat = str(summary.get('headless_status', 'skipped') or 'skipped')
+    if _authed or _hstat != 'skipped' or 'headless_status' in summary:
+        _auth_line = (f"Authenticated session: <strong>yes</strong> "
+                      f"({html.escape(str(summary.get('auth_login_url', '')))})"
+                      if _authed else
+                      "Authenticated session: <strong>no</strong> "
+                      "(public surface only)")
+        coverage_section = f"""
+    <h2>Coverage: Authentication &amp; Headless Crawl</h2>
+    <p>{_auth_line}</p>
+    <p>Headless Chromium: <strong>{html.escape(_hstat)}</strong> |
+       Pages rendered: <strong>{summary.get('headless_pages_visited', 0)}</strong> |
+       URLs found: <strong>{summary.get('headless_urls_found', 0)}</strong> |
+       New URLs fed to scanner: <strong>{summary.get('headless_urls_added', 0)}</strong> |
+       Forms found: <strong>{summary.get('headless_forms_found', 0)}</strong></p>
+    <p><em>Skipped</em> means Playwright/Chromium was unavailable
+    (run <code>pip install playwright &amp;&amp; playwright install
+    chromium</code>) or <code>--no-headless</code> was passed - the static
+    crawl results are unaffected.</p>"""
+
     banner = ""
     trunc = summary.get('findings_truncated', {})
     if trunc:
@@ -1996,6 +2046,8 @@ table.vuln-main td {{ vertical-align: top; }}
     </table>
 
     {exploit_section}
+
+    {coverage_section}
 
     <h2>Remediation Recommendations</h2>
 
@@ -2203,7 +2255,8 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
 
 async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any]],
                                 args: argparse.Namespace,
-                                waf_info: Dict[str, Any] = None) -> Dict[str, Any]:
+                                waf_info: Dict[str, Any] = None,
+                                auth: AuthContext = None) -> Dict[str, Any]:
     """Verify detected vulnerabilities automatically, inside engagement scope.
 
     Returns the runner summary (``status``/``confirmed``/``possible``/
@@ -2251,6 +2304,7 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
         aggressive=bool(getattr(args, 'exploit_aggressive', False)),
         concurrency=getattr(args, 'exploit_concurrency', 6),
         waf_info=waf_info if isinstance(waf_info, dict) else {},
+        auth=auth,
         oob={
             'domain': getattr(args, 'oob_domain', '') or '',
             'wait': getattr(args, 'oob_wait', 60.0) or 60.0,
@@ -2311,6 +2365,119 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
     return summary
 
 
+async def run_coverage_stage(target: str, args: argparse.Namespace,
+                             discovery_results: Dict[str, Any],
+                             ckpt=None,
+                             _pre_auth: AuthContext = None):
+    """Authenticated login + headless-browser crawl (Prompt B - Coverage).
+
+    Returns ``(auth_ctx_or_None, headless_summary_dict)``.  Never raises;
+    every failure degrades to anonymous/static-crawl output.  Credentials
+    never touch the checkpoint - only the secret-free summaries are merged
+    into ``discovery_results`` (and re-saved) below.
+    """
+    auth_ctx: Optional[AuthContext] = _pre_auth
+    try:
+        settings = resolve_auth_args(args)
+    except Exception:
+        settings = {"login_url": "", "username": "",
+                    "password": "", "verify": ""}
+    wants_auth = bool(settings.get("username") and settings.get("password"))
+
+    # Login URL: explicit flag/env wins, else the first discovered form.
+    login_url = (settings.get("login_url") or "").strip()
+    if wants_auth and not login_url and isinstance(discovery_results, dict):
+        try:
+            for form in discovery_results.get("login_forms") or []:
+                if isinstance(form, dict) and form.get("url"):
+                    login_url = str(form["url"])
+                    break
+        except Exception:
+            login_url = ""
+    if auth_ctx is None and wants_auth:
+        if not login_url:
+            cprint("  [*] Auth skipped: credentials given but no login URL "
+                   "found (pass --auth-login-url or wait for form discovery)")
+        else:
+            markers = [m.strip() for m in
+                       str(settings.get("verify") or "").split(",") if m.strip()]
+            with _phase('authenticated login'):
+                auth_ctx = await login_with_credentials(
+                    login_url, settings["username"], settings["password"],
+                    verify_markers=markers,
+                    verify_url=(target if str(target).startswith(
+                        ("http://", "https://")) else ""))
+            if auth_ctx is not None and auth_ctx.authenticated:
+                cprint(f"  [+] Authenticated session: {auth_ctx.username} "
+                       f"({auth_ctx.verified_by})")
+            else:
+                detail = (auth_ctx.detail if auth_ctx is not None else
+                          "login failed")
+                cprint(f"  [-] Auth failed ({detail}); continuing anonymously")
+                auth_ctx = None
+
+    headless_summary: Dict[str, Any] = {"status": "skipped",
+                                        "detail": "headless crawl disabled"}
+    if getattr(args, "no_headless", False):
+        cprint("  [*] Headless crawl disabled (--no-headless)")
+    else:
+        # Resume rule: a completed headless pass already merged its URLs
+        # into the checkpointed payload - never re-crawl, just re-login
+        # (sessions are in-memory only).
+        existing = (discovery_results.get("headless")
+                    if isinstance(discovery_results, dict) else None)
+        if isinstance(existing, dict) and existing.get("status") == "completed":
+            headless_summary = dict(existing)
+            cprint(f"  [*] Resume: headless crawl kept from checkpoint "
+                   f"({headless_summary.get('urls_found', 0)} URL(s), not re-run)")
+        else:
+            seeds = _scan_targets(discovery_results) or [target]
+            try:
+                max_pages = int(getattr(args, "crawl_max_pages", 30) or 30)
+            except (TypeError, ValueError):
+                max_pages = 30
+            with _phase('headless crawl'):
+                crawled = await headless_crawl(
+                    seeds, HeadlessConfig(max_pages=max_pages), auth=auth_ctx)
+            headless_summary = crawled.summary()
+            if crawled.status == "completed":
+                added = 0
+                try:
+                    known = {str(u) for u in
+                             (discovery_results.get("urls") or [])
+                             if isinstance(u, str)}
+                    for url in crawled.urls:
+                        if url not in known:
+                            discovery_results.setdefault("urls", []).append(url)
+                            known.add(url)
+                            added += 1
+                    if crawled.forms:
+                        discovery_results["headless_forms"] = [
+                            f for f in crawled.forms if isinstance(f, dict)]
+                except Exception:
+                    pass
+                headless_summary["urls_added"] = added
+                cprint(f"  [+] Headless crawl: {crawled.pages_visited} page(s), "
+                       f"{len(crawled.urls)} URL(s) ({added} new), "
+                       f"{len(crawled.forms)} form(s)"
+                       f"{' [authenticated]' if auth_ctx is not None else ''}")
+            else:
+                cprint(f"  [*] Headless crawl skipped: {crawled.detail}")
+
+    # Merge secret-free summaries so checkpoints and reports stay
+    # byte-identical across resume (credentials never persist).
+    try:
+        if isinstance(discovery_results, dict):
+            discovery_results["auth"] = (auth_ctx.summary()
+                                         if auth_ctx is not None else None)
+            discovery_results["headless"] = headless_summary
+            if ckpt is not None and ckpt.has("discovery"):
+                ckpt.save_stage("discovery", discovery_results)
+    except Exception as exc:
+        cprint(f"  [!] Coverage checkpoint re-save failed: {exc}")
+    return auth_ctx, headless_summary
+
+
 async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None:
     scan_types_map = {
         'tcp_connect': 'tcp_connect', 'syn': 'syn_stealth', 'syn_stealth': 'syn_stealth',
@@ -2335,6 +2502,37 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             cprint(f"  [!] Checkpoint unavailable ({exc}); running without resume")
             ckpt = None
         _resuming = bool(getattr(args, 'resume', False)) and ckpt is not None
+        # Prompt-B pre-auth: explicit login URL + credentials authenticate
+        # BEFORE discovery, so even recon runs with the session.  Without
+        # an explicit URL the login waits for discovered forms (coverage
+        # stage, after discovery).  Sessions are in-memory only - a resume
+        # always re-logs in; only secret-free summaries persist.
+        _auth_box: Dict[str, Any] = {"ctx": None}
+        if args.mode in ('full', 'all', 'discovery', 'recon', 'vuln'):
+            try:
+                _pre_settings = resolve_auth_args(args)
+            except Exception:
+                _pre_settings = {}
+            if (_pre_settings.get("login_url") and _pre_settings.get("username")
+                    and _pre_settings.get("password")):
+                with _phase('authenticated login'):
+                    _pre_auth = await login_with_credentials(
+                        _pre_settings["login_url"], _pre_settings["username"],
+                        _pre_settings["password"],
+                        verify_markers=[m.strip() for m in
+                                        str(_pre_settings.get("verify") or "")
+                                        .split(",") if m.strip()],
+                        verify_url=(target if str(target).startswith(
+                            ("http://", "https://")) else ""))
+                if _pre_auth is not None and _pre_auth.authenticated:
+                    _auth_box["ctx"] = _pre_auth
+                    cprint(f"  [+] Authenticated session: {_pre_auth.username} "
+                           f"({_pre_auth.verified_by}) - discovery runs authed")
+                else:
+                    _detail = (_pre_auth.detail if _pre_auth is not None
+                               else "login failed")
+                    cprint(f"  [-] Pre-auth failed ({_detail}); "
+                           f"continuing anonymously")
         if ckpt is not None:
             try:
                 ckpt.touch({'mode': getattr(args, 'mode', 'full')})
@@ -2386,7 +2584,8 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                     res = await run_discovery(
                         target, args.output, scan_types,
                         parse_ports(args.ports) if args.ports else None,
-                        args.concurrent, args.rate, args.jitter
+                        args.concurrent, args.rate, args.jitter,
+                        auth=_auth_box.get("ctx"),
                     )
                 if args.pause:
                     input("  [*] Paused. Press Enter to continue...")
@@ -2402,6 +2601,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                         parse_ports(args.ports) if args.ports else None,
                         args.concurrent, args.rate, args.jitter,
                         stages=list(_Disc.LIGHT_STAGES),
+                        auth=_auth_box.get("ctx"),
                     )
                 if args.pause:
                     input("  [*] Paused. Press Enter to continue...")
@@ -2427,11 +2627,21 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             if not health['healthy']:
                 scan_partial = True
                 cprint("\n  [!] DISCOVERY DEGRADED - nothing found for: "
-                      f"{', '.join(health['empty'])}")
+                       f"{', '.join(health['empty'])}")
                 cprint("  [!] Likely causes: DNS resolver failure, host "
-                      "unreachable, or request filtering.")
+                       "unreachable, or request filtering.")
                 cprint("  [!] Later phases fall back to the target URL only. "
-                      "This run will be marked PARTIAL.\n")
+                       "This run will be marked PARTIAL.\n")
+
+        # Prompt-B coverage: form-derived login (when no pre-auth ran) +
+        # headless-browser crawl.  Merged URLs feed the vuln stage below;
+        # the live session seeds every later stage.
+        auth_ctx: Optional[AuthContext] = _auth_box.get("ctx")
+        if args.mode in ('full', 'all', 'discovery', 'recon', 'vuln'):
+            if isinstance(discovery_results, dict):
+                auth_ctx, _headless = await run_coverage_stage(
+                    target, args, discovery_results, ckpt,
+                    _pre_auth=auth_ctx)
 
         if args.mode in ('full', 'all', 'vuln'):
             # Align with FrameworkConfig: stealth AND balanced are stealthy,
@@ -2488,7 +2698,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                     vulnerabilities = await run_vuln_scan(
                         target, scan_urls, stealth, waf_info=waf_info,
                         resume_completed=set(_completed),
-                        progress_cb=_vuln_progress)
+                        progress_cb=_vuln_progress, auth=auth_ctx)
                 if ckpt is not None:
                     try:
                         ckpt.save_stage('vuln', {'vulnerabilities': vulnerabilities,
@@ -2770,7 +2980,8 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             async def _run_exploit_stage():
                 try:
                     return await run_auto_exploitation(target, vulnerabilities, args,
-                                                       waf_info=waf_info)
+                                                       waf_info=waf_info,
+                                                       auth=auth_ctx)
                 except Exception as exc:
                     cprint(f"  [!] Automated exploitation aborted ({exc}); continuing to reporting")
                     try:

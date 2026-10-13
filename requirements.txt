@@ -31,6 +31,10 @@ httpx>=0.24.0
 # Optional engines (pip-installable; Go binaries via scripts/install_tools.py)
 wafw00f>=2.4.0
 
+# Optional - headless coverage crawl (Prompt B; also needs browser binaries:
+# run `playwright install chromium` once - crawl skips cleanly without them)
+playwright>=1.40.0
+
 # PDF & Charts
 matplotlib>=3.8.0
 

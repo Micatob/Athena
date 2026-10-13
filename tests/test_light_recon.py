@@ -261,8 +261,9 @@ class TestRunDiscoveryPassesStages:
         seen = {}
 
         class _Recorder:
-            def __init__(self):
+            def __init__(self, *args, **kwargs):
                 seen['stages'] = 'NOT_CALLED'
+                seen['kwargs'] = kwargs
 
             async def run(self, target, stages=None):
                 seen['stages'] = stages
@@ -284,6 +285,9 @@ class TestRunDiscoveryPassesStages:
         seen = {}
 
         class _Recorder:
+            def __init__(self, *args, **kwargs):
+                seen['kwargs'] = kwargs
+
             async def run(self, target, stages=None):
                 seen['stages'] = stages
                 return {}
@@ -297,6 +301,29 @@ class TestRunDiscoveryPassesStages:
         monkeypatch.setattr(athena, 'DiscoveryModule', _Recorder)
         asyncio.run(athena.run_discovery('https://t'))
         assert seen['stages'] is None
+
+    def test_auth_context_is_forwarded(self, monkeypatch):
+        from modules.auth_session import AuthContext
+        seen = {}
+
+        class _Recorder:
+            def __init__(self, *args, **kwargs):
+                seen['kwargs'] = kwargs
+
+            async def run(self, target, stages=None):
+                return {}
+
+            async def harvest_emails(self, target, urls):
+                return []
+
+            async def close(self):
+                return None
+
+        ctx = AuthContext(login_url="http://t/login", username="op",
+                          authenticated=True, cookies={"sid": "v"})
+        monkeypatch.setattr(athena, 'DiscoveryModule', _Recorder)
+        asyncio.run(athena.run_discovery('https://t', auth=ctx))
+        assert seen['kwargs'].get('auth') is ctx
 
 
 # -- discovery failure must be loud ------------------------------------------
