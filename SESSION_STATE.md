@@ -790,3 +790,44 @@ criteria). Do NOT start B or C until the operator says so.
 1. Decide commit/push of Prompt B (operator call).
 2. Optional: `playwright install chromium` on this box for live headless.
 3. Then Prompt C (SQLite store, queue, exports, API mode).
+
+---
+
+# Athena Session - 2026-10-13, part 3 (Prompt C DONE, pushed)
+
+## Status: ALL THREE PROMPTS COMPLETE — 1002 passed, 1 skipped
+
+### Already existed (kept intact)
+- Flask API: `/health /metrics /scan /scan/status /scan/url /jobs`
+  + engagements/sessions/findings/attack-path, API-key gate, rate limits
+  (`tests/test_api.py`). Exports html/json/csv/pdf. In-memory `JOBS`.
+
+### New: `modules/scan_store.py` (stdlib sqlite3 only)
+- DB `~/.athena/athena.db` (`ATHENA_DB_PATH` override, `--store` flag):
+  `scans` (target/mode/status/summary/findings count/report path),
+  `findings` (severity/type/url/full JSON, cap 2000/scan), `jobs`
+  (durable queue: QUEUED -> RUNNING -> COMPLETE|FAILED).
+- `export_scan()` re-emits json/csv (HTML stays live-only - needs the
+  discovery payload, documented in help + code).
+- Every function degrades on SQLite failure; store never breaks scans/API.
+
+### Wiring (`athena.py`)
+- `_record_scan_history()` after live reports (status complete) and after
+  emergency fallbacks (status partial).
+- `POST /scan` persists the job durably (same id); `_run_background_scan`
+  mirrors status; startup requeues stale RUNNING; `/scan/status` falls
+  back to the store (404 preserved for unknown ids).
+- New: `GET /scans`, `GET /scans/<id>` (+severity counts),
+  `GET /scans/<id>/export?format=json|csv`.
+- CLI: `--history`, `--export-history ID` (+`--export`+`--output`),
+  `--store`. README §3c.
+
+### Hygiene fix
+- `tests/test_api.py` POST-/scan tests wrote 17 QUEUED rows into the
+  operator's REAL `~/.athena/athena.db`. Fixture now sets `ATHENA_DB_PATH`
+  to a tmp dir; real DB file removed (contained only test rows).
+
+### Tests
+- `tests/test_scan_store.py` (13): record/read/list/counts/exports,
+  queue lifecycle + stale requeue, API history/export/status-fallback,
+  CLI history/export. Full suite: **1002 passed, 1 skipped**.

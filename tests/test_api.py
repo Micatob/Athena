@@ -43,6 +43,7 @@ if str(HERE) not in sys.path:
 def flask_app():
     """Build a Flask test app without binding to a port."""
     import os
+    import tempfile
     os.environ.setdefault('ATHENA_API_KEY', 'test-api-key-athena-1234')
     os.environ.setdefault('REQUIRE_API_KEY', 'true')
     os.environ.setdefault('AETHELRED_SAFE_MODE', 'true')
@@ -50,6 +51,9 @@ def flask_app():
     os.environ.setdefault('HTTPS_ENABLED', 'false')
     os.environ.setdefault('RATE_LIMIT_SCAN', '1000 per minute')
     os.environ.setdefault('RATE_LIMIT_DEFAULT', '10000 per hour')
+    # Durable queue/history must never touch the operator's real DB.
+    os.environ['ATHENA_DB_PATH'] = os.path.join(
+        tempfile.mkdtemp(prefix='athena-test-db-'), 'test.db')
 
     # Patch Flask.run so run_web_server doesn't block
     from flask import Flask

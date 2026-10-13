@@ -233,6 +233,18 @@ Examples:
                                      '(default: logout/dashboard detection). '
                                      'Env: ATHENA_AUTH_VERIFY')
 
+    history_group = parser.add_argument_group('History (Prompt C)')
+    history_group.add_argument('--history', action='store_true',
+                               help='List recent finished scans from the local '
+                                    'SQLite history and exit')
+    history_group.add_argument('--export-history', metavar='SCAN_ID',
+                               help='Re-emit a stored scan (json/csv via '
+                                    '--output) to --export path (or stdout) '
+                                    'and exit')
+    history_group.add_argument('--store',
+                               help='SQLite history path (default: '
+                                    '~/.athena/athena.db). Env: ATHENA_DB_PATH')
+
     tool_group = parser.add_argument_group('External Tools')
     tool_group.add_argument('--no-nuclei', action='store_true',
                             help='Skip the external nuclei template engine '
@@ -1269,6 +1281,98 @@ def _service_banner_techs(enumeration: Dict[str, Any]) -> List[Dict[str, Any]]:
                               'confidence': 4,
                               'source': 'service_banner'})
     return techs
+
+
+def _record_scan_history(target: str, args, vulnerabilities,
+                         output_path: str = "", status: str = "complete") -> int:
+    """Persist a finished scan to the SQLite history (Prompt C).
+
+    Returns the scan id (0 when the store is unavailable).  Never raises:
+    history must not break reporting.
+    """
+    try:
+        from modules.scan_store import open_store
+        store = open_store()
+        if store is None:
+            return 0
+        try:
+            counts = {"critical": 0, "high": 0, "medium": 0,
+                      "low": 0, "info": 0, "other": 0}
+            for finding in vulnerabilities or []:
+                if not isinstance(finding, dict):
+                    continue
+                sev = str(finding.get("severity", "")).strip().lower()
+                counts[sev if sev in counts else "other"] += 1
+            summary = {
+                "mode": getattr(args, "mode", "full"),
+                "status": status,
+                "severity_counts": counts,
+                "total": sum(counts.values()),
+            }
+            return store.record_scan(
+                target, getattr(args, "mode", "full"), status, summary,
+                [v for v in (vulnerabilities or []) if isinstance(v, dict)],
+                output_path or "")
+        finally:
+            try:
+                store.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        cprint(f"  [!] Scan history not recorded ({exc})")
+        return 0
+
+
+def _run_history_command(args) -> None:
+    """`--history` list and `--export-history ID` re-emit (Prompt C)."""
+    from modules.scan_store import export_scan, open_store
+    store = open_store()
+    if store is None:
+        cprint("  [!] Scan history unavailable (could not open the store)")
+        return
+    try:
+        export_id = getattr(args, "export_history", None)
+        if export_id is not None:
+            try:
+                scan_id = int(str(export_id).strip())
+            except (TypeError, ValueError):
+                cprint(f"  [!] --export-history needs a numeric scan id, "
+                       f"got {export_id!r} (see --history)")
+                return
+            fmt = str(getattr(args, "output", "json") or "json").lower()
+            if fmt not in ("json", "csv"):
+                cprint("  [!] History export supports json/csv only "
+                       "(full HTML reports are produced live)")
+                return
+            content = export_scan(store, scan_id, fmt)
+            if content is None:
+                cprint(f"  [!] No stored scan with id {scan_id}")
+                return
+            dest = getattr(args, "export", None)
+            if dest:
+                path = dest if dest.endswith(f".{fmt}") else f"{dest}.{fmt}"
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                cprint(f"  [+] Scan {scan_id} exported to {path}")
+            else:
+                print(content)
+            return
+        rows = store.list_scans(limit=20)
+        if not rows:
+            cprint("  [*] No finished scans in history yet")
+            return
+        cprint(f"  {'ID':<6}{'TARGET':<32}{'MODE':<10}{'STATUS':<10}"
+               f"{'FINISHED':<22}FINDINGS")
+        for row in rows:
+            cprint(f"  {row['id']:<6}{str(row['target'])[:30]:<32}"
+                   f"{row['mode']:<10}{row['status']:<10}"
+                   f"{str(row['finished_at'])[:19]:<22}"
+                   f"{row['findings_stored']}")
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
 
 
 def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: List[Dict[str, Any]],
@@ -3024,6 +3128,8 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 external_tools=external_tools,
                 correlation=correlation_stats,
             )
+            _record_scan_history(target, args, vulnerabilities,
+                                 output_path, status="complete")
         except Exception as exc:
             cprint(f"  [!] Report generation failed ({exc}); writing emergency fallback report")
             try:
@@ -3051,6 +3157,10 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 with open(f"{output_path}.fallback.json", "w", encoding="utf-8") as _ff:
                     json.dump(_fallback, _ff, indent=2, default=str)
                 cprint(f"  [+] Fallback report: {output_path}.fallback.json")
+                _record_scan_history(
+                    target, args,
+                    [v for v in (vulnerabilities or []) if isinstance(v, dict)],
+                    f"{output_path}.fallback.json", status="partial")
                 scan_partial = True
             except Exception as exc2:
                 cprint(f"  [!] Fallback report also failed: {exc2}")
@@ -3505,6 +3615,7 @@ async def _run_background_scan(job_id: str, targets: List[str], mode: str) -> No
     job = JOBS.get(job_id)
     if job:
         job['status'] = 'RUNNING'
+    _persist_job(job_id, 'RUNNING')
     try:
         mode_text = {'1': 'full', '2': 'discovery', '3': 'vuln'}.get(mode, mode)
         args = argparse.Namespace(
@@ -3520,11 +3631,31 @@ async def _run_background_scan(job_id: str, targets: List[str], mode: str) -> No
                 {'target': t, 'report_file': f"report_{_safe_report_name(t)}.json"}
                 for t in targets
             ]
+        _persist_job(job_id, 'COMPLETE')
     except Exception as exc:
         if job:
             job['status'] = 'FAILED'
             job['finished_at'] = datetime.now(timezone.utc).isoformat()
             job['error'] = str(exc)
+        _persist_job(job_id, 'FAILED', str(exc))
+
+
+def _persist_job(job_id: str, status: str, error: str = "") -> None:
+    """Mirror a queue transition into the durable store.  Never raises."""
+    try:
+        from modules.scan_store import open_store
+        store = open_store()
+        if store is None:
+            return
+        try:
+            store.set_job_status(job_id, status, error)
+        finally:
+            try:
+                store.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def create_app(safe_mode: bool = True) -> Flask:
@@ -3532,6 +3663,24 @@ def create_app(safe_mode: bool = True) -> Flask:
     app = Flask('athena')
     FrameworkConfig.SAFE_MODE = safe_mode
     os.environ['AETHELRED_SAFE_MODE'] = 'true' if safe_mode else 'false'
+    # Crash recovery: jobs stuck RUNNING died with a previous server run;
+    # requeue them instead of parking them forever.
+    try:
+        from modules.scan_store import open_store
+        _boot_store = open_store()
+        if _boot_store is not None:
+            try:
+                _requeued = _boot_store.reset_stale_running()
+                if _requeued:
+                    app.logger.info('requeued %d stale running job(s)',
+                                    _requeued)
+            finally:
+                try:
+                    _boot_store.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     @app.after_request
     def _sec(response):
@@ -3598,6 +3747,21 @@ def create_app(safe_mode: bool = True) -> Flask:
                 'mode': mode, 'started_at': now_iso, 'finished_at': None,
                 'error': None, 'results': None,
             }
+        # Durable queue mirror: a server restart loses JOBS but never the
+        # queued job itself (startup requeues stale RUNNING rows).
+        try:
+            from modules.scan_store import open_store
+            _store = open_store()
+            if _store is not None:
+                try:
+                    _store.enqueue(targets, mode, job_id=job_id)
+                finally:
+                    try:
+                        _store.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         threading.Thread(
             target=lambda: asyncio.run(_run_background_scan(job_id, targets, mode)),
             daemon=True,
@@ -3617,6 +3781,22 @@ def create_app(safe_mode: bool = True) -> Flask:
         if auth_err:
             return auth_err
         job = JOBS.get(job_id)
+        if not job:
+            # Durable fallback: the live view is gone (restart), but the
+            # store still knows this job.
+            try:
+                from modules.scan_store import open_store
+                _store = open_store()
+                if _store is not None:
+                    try:
+                        job = _store.get_job(job_id)
+                    finally:
+                        try:
+                            _store.close()
+                        except Exception:
+                            pass
+            except Exception:
+                job = None
         if not job:
             return jsonify({'error': 'Not found', 'detail': f'No job with id {job_id}'}), 404
         return jsonify(job)
@@ -3659,6 +3839,101 @@ def create_app(safe_mode: bool = True) -> Flask:
             'finished_at': j['finished_at'],
         } for j in JOBS.values()]
         return jsonify({'jobs': summary, 'total': len(summary)})
+
+    # ------------------------------------------------------------------
+    # Scan history (Prompt C) - finished scans from the SQLite store
+    # ------------------------------------------------------------------
+
+    @app.route('/scans', methods=['GET'])
+    def scans_history():
+        auth_err = _require_api_key()
+        if auth_err:
+            return auth_err
+        try:
+            limit = max(1, min(100, int(request.args.get('limit', 20))))
+        except (TypeError, ValueError):
+            limit = 20
+        try:
+            from modules.scan_store import open_store
+            _store = open_store()
+            if _store is None:
+                return jsonify({'error': 'Service unavailable',
+                                'detail': 'scan history store is unavailable'}), 503
+            try:
+                rows = _store.list_scans(limit=limit)
+            finally:
+                try:
+                    _store.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            return jsonify({'error': 'Service unavailable',
+                            'detail': str(exc)}), 503
+        return jsonify({'scans': rows, 'total': len(rows)})
+
+    @app.route('/scans/<int:scan_id>', methods=['GET'])
+    def scan_detail(scan_id):
+        auth_err = _require_api_key()
+        if auth_err:
+            return auth_err
+        try:
+            from modules.scan_store import open_store
+            _store = open_store()
+            if _store is None:
+                return jsonify({'error': 'Service unavailable',
+                                'detail': 'scan history store is unavailable'}), 503
+            try:
+                scan = _store.get_scan(scan_id)
+                counts = _store.severity_counts(scan_id) if scan else {}
+            finally:
+                try:
+                    _store.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            return jsonify({'error': 'Service unavailable',
+                            'detail': str(exc)}), 503
+        if not scan:
+            return jsonify({'error': 'Not found',
+                            'detail': f'No stored scan with id {scan_id}'}), 404
+        scan['severity_counts'] = counts
+        return jsonify(scan)
+
+    @app.route('/scans/<int:scan_id>/export', methods=['GET'])
+    def scan_export(scan_id):
+        auth_err = _require_api_key()
+        if auth_err:
+            return auth_err
+        fmt = str(request.args.get('format', 'json')).lower()
+        if fmt not in ('json', 'csv'):
+            return jsonify({'error': 'Bad request',
+                            'detail': "format must be 'json' or 'csv' "
+                                      "(full HTML reports are produced live)"}), 400
+        try:
+            from modules.scan_store import export_scan, open_store
+            _store = open_store()
+            if _store is None:
+                return jsonify({'error': 'Service unavailable',
+                                'detail': 'scan history store is unavailable'}), 503
+            try:
+                content = export_scan(_store, scan_id, fmt)
+            finally:
+                try:
+                    _store.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            return jsonify({'error': 'Service unavailable',
+                            'detail': str(exc)}), 503
+        if content is None:
+            return jsonify({'error': 'Not found',
+                            'detail': f'No stored scan with id {scan_id}'}), 404
+        if fmt == 'csv':
+            resp = app.response_class(content, mimetype='text/csv')
+            resp.headers['Content-Disposition'] = (
+                f'attachment; filename="athena_scan_{scan_id}.csv"')
+            return resp
+        return app.response_class(content, mimetype='application/json')
 
     # ------------------------------------------------------------------
     # Assessment API – engagements / sessions / findings / attack paths
@@ -4060,7 +4335,15 @@ async def main():
     if args.list_stages:
         for s in stage_list():
             cprint(f"  {s['key']:<28} {s['name']} "
-                  f"(produces: {', '.join(s['produces']) or 'none'})")
+                   f"(produces: {', '.join(s['produces']) or 'none'})")
+        return
+
+    if getattr(args, 'store', None):
+        os.environ['ATHENA_DB_PATH'] = str(args.store)
+
+    if getattr(args, 'history', False) or \
+            getattr(args, 'export_history', None) is not None:
+        _run_history_command(args)
         return
 
     if args.stage or args.preflight:

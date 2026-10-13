@@ -247,6 +247,17 @@ python athena.py -t TARGET --auth-user op --auth-pass s3cret --auth-login-url ht
 - `--no-headless` / `--crawl-max-pages N` (default 30): headless Chromium renders JS-heavy pages the static crawler can't see; found URLs feed the scanner automatically. Skips cleanly when Playwright/Chromium is missing.
 - Passwords are never logged, checkpointed, or reported - only the login URL and verification result persist.
 
+### 3c. History: SQLite store, queue & exports
+
+Every finished scan is recorded in `~/.athena/athena.db` (override with `--store PATH` or `ATHENA_DB_PATH`):
+
+```powershell
+python athena.py --history                          # list recent scans
+python athena.py --export-history 12 --export out --output csv   # re-emit findings
+```
+
+API mode (`-m api` / `--api`) additionally serves `GET /scans`, `GET /scans/<id>`, `GET /scans/<id>/export?format=json|csv`. Scan jobs posted to `POST /scan` are tracked durably - a server restart requeues interrupted jobs instead of losing them (`/scan/status/<id>` still resolves afterwards).
+
 ### 4. Output formats (`-o` / `--output`)
 
 `html` *(default)*, `json`, `csv`, `pdf`, or `all`. Reports are written to `report_<target>.*` in the project root, or to a custom path with `--export <path>`.
