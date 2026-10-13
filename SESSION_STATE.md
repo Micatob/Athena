@@ -662,3 +662,76 @@ until the operator says so.
 - Producer of the original None not isolated (all scanner appends are dict
   literals; nuclei/dalfox/sqlmap parsers clean) — guards + drop-logs at
   every boundary make the class of crash impossible regardless of source.
+
+---
+
+# Athena Session - 2026-10-13 (Prompt A DONE, pushed)
+
+## Status: PROMPT A COMPLETE — 958 passed, 1 skipped, pushed `589240f`
+
+Implemented `PROMPT_A_RESILIENCE.md` (all 3 deliverables, all 5 acceptance
+criteria). Do NOT start B or C until the operator says so.
+
+### 1. Checkpoint / resume (criterion 1)
+- NEW `modules/checkpoint.py` — `CheckpointManager`: per-target dir
+  `~/.athena/checkpoints/<sha256[:16]>/` with `state.json` + `<stage>.json`
+  payloads + `vuln_progress.json`; atomic writes; 24h staleness
+  (`is_stale()`); `save/load/has/drop_stage`, `save/load/clear_progress`,
+  `clear` (`--restart`).
+- `athena.py::_resumable_stage()` wraps discovery/vuln/tools/bruteforce/
+  enumeration/cve/ai/exploitation: `resume=True` returns saved payloads
+  untouched (stage body never executes). CVE stage converts dataclasses via
+  `cve_results_to_json/from_json` for JSON-safe checkpoints.
+- CLI: `--resume --restart --checkpoint-dir` (verified in `--help`).
+  SIGINT handler flushes checkpoints and exits 130.
+- Vuln scanner checkpoints URL progress every 25 URLs (`skip_urls` resume).
+
+### 2. Timing + OOB proof (criteria 2-3)
+- NEW `modules/verification/timing.py` — N-round differential
+  (3 benign vs 3 payload/level, median + MAD, factor 2.5, min_delta 0.5s);
+  verdicts `confirmed_timing | inconclusive_timing | skipped_waf`
+  (WAF-aware abort on 403/406 x2).
+- NEW `modules/verification/oob.py` — pluggable collectors (interactsh,
+  webhook.site, operator `--oob-domain`, local listener last); third-party
+  gated behind `--allow-oob-third-party`; verdicts `confirmed_oob |
+  inconclusive_oob | skipped_no_collector`; undelivered probes skip the
+  60s wait window. CLI: `--oob-domain --oob-wait --allow-oob-third-party`.
+- `ExploitationRunner` runs timing then OOB as second opinion for
+  inconclusive SQLi/SSTI/LDAPi; every attempt carries `proof_kind`
+  (`response_signature | timing | oob | none`) + `confidence`; report HTML
+  has a Proof column; inconclusive details always say "no proof".
+
+### 3. Cross-tool correlation (criterion 4)
+- NEW `modules/correlation.py` — deterministic grouping by
+  (normalized path + vuln class + param), no LLM. Merged findings get
+  `sources: ['athena-native', 'nuclei:<template>']` + `corroborated: True`;
+  leftovers labelled `tool_only: True`; `summary()` feeds report keys
+  `corroborated_findings` / `tool_only_findings`.
+
+### 4. Session fixes worth remembering
+- `tests/test_exploitation_runner.py` HUNG (live 27s DNS-timeout timing
+  probes per inconclusive finding against `in-scope.test.local`): the
+  `runner()` helper now defaults `enable_timing=False, oob=False`; tests
+  opt in explicitly with stubbed transport (`TestSecondOpinion`).
+- PowerShell quoting: never `python -c` with quotes/ampersands — write temp
+  scripts to `C:\Users\Hermes\AppData\Local\Temp\opencode\` and set
+  `$env:PYTHONPATH` to the repo; read redirected logs with
+  `encoding='utf-16'`.
+
+### 5. Tests (all new, all fast, no network)
+- `tests/test_verification.py` (9), `tests/test_correlation.py` (5),
+  `tests/test_checkpoint.py` (7 incl. crash+resume mock-counter test
+  asserting report inputs match the no-crash baseline).
+- Full suite: **958 passed, 1 skipped** (pre-existing skip).
+
+### 6. Pushed
+- Commit `589240f` → `Micatob/Athena` `master` (+3406/-353, 26 files).
+  `fullscan.txt` left untracked (scan transcript, not source). `.env`
+  gitignored. No gaps file needed — every criterion met.
+
+## NEXT: Prompts B and C (not started)
+- **B = Coverage:** headless crawl (Playwright), authenticated sessions.
+  (Native+nuclei correlation already done in A.)
+- **C = Operations:** SQLite store, scan queue, exports, API mode.
+- Constraints carry over: safe-mode semantics unchanged, no new hard
+  dependencies, B/C scope bans still apply in reverse (don't regress A).
