@@ -196,14 +196,23 @@ Key variables (all optional; sane defaults exist):
 
 ### 1. Scan modes (`-m` / `--mode`)
 
-| Mode | Runs | Use case |
-|---|---|---|
-| `full` *(default)* | Discovery → vuln scan → bruteforce → enumeration → CVE mapping → report | Complete assessment |
-| `discovery` | Recon only (crawl, ports, fingerprint, emails) + enumeration + **hidden-directory/backup-file scanner** | Asset mapping, low-noise recon |
-| `vuln` | Vulnerability scan only | Fast vuln check against known URLs |
-| `bruteforce` | Discovery + credential testing | Password/default-cred audit |
-| `recon` | Discovery + bruteforce + enumeration + CVE mapping | Extended recon with CVE context |
-| `all` | Everything including bruteforce | Exhaustive assessment |
+| Mode | Runs | Use case | Verdict |
+|---|---|---|---|
+| `full` *(default)* | Discovery + Omega pack → vuln scan → nuclei/dalfox/httpx/wafw00f → bruteforce → enumeration → CVE+KEV → AI triage → verified exploitation → report | Complete assessment | ✅ **GOOD — recommended for real targets** |
+| `all` | Everything `full` does, forced exhaustive (all vuln classes + all bruteforce + all enum) | Max-coverage audit, labs | ✅ **GOOD — the all-out scan** (see command below) |
+| `discovery` | Recon only (crawl, ports, fingerprint, emails) + Omega pack + enumeration + **hidden-directory/backup-file scanner** | Asset mapping, low-noise recon | ✅ Good |
+| `vuln` | Light discovery + vulnerability scan only | Fast vuln check against known URLs | ✅ Good |
+| `recon` | Discovery + Omega pack + bruteforce + enumeration + CVE mapping | Extended recon with CVE context | ✅ Good |
+| `bruteforce` | Discovery + credential testing | Password/default-cred audit | ⚠️ Niche — use for cred audits only |
+
+Every HTTP mode runs **PHASE 0 WAF gate first** (native + wafw00f, auto-tunes to low-rate + bypass payloads) and the **Omega recon pack** (TLS / GraphQL / takeover / vhost / origin / JS secrets / serialized / supply-chain, `--no-omega` to skip, `--omega-tools` to restrict). Omega findings with evidence join the report set as `source=omega_*`; info/dev-refs stay in the SQLite graph (`~/.athena/graph.db`) only.
+
+**All-out scan (low-FP, max coverage):**
+```powershell
+playwright install chromium
+python athena.py -t TARGET -m all -p balanced --ports top1000 --crawl-max-pages 50 --restart -o html -v
+```
+Proven on a live ModSecurity host: discovery 167s→82s, native 372→37 (FP filtered), graph 71→96 nodes, first timing-confirmed SSTI. `-p balanced` keeps stealth ON — `aggressive` on a WAF just buys blocks/timeouts.
 
 ### 2. Operational profiles (`-p` / `--profile`)
 
@@ -816,6 +825,20 @@ The following items are **documented but incomplete** in the current codebase:
 3. **Stale artifacts in the repo root.** `aethelred_structured.jsonl.5` (~20 MB), old `report_*.json` files, and zero-byte `aethelred.log` are not covered by `.gitignore` (the `.jsonl` pattern doesn't match the `.5` suffix) and shouldn't be committed.
 
 4. **Docs drift.** `docs/USER_GUIDE.md` and `docs/API_REFERENCE.md` describe API behavior that was implemented in the current codebase but should be verified against it (e.g. rate-limit values, `--api` defaults). `.env.example` still mixes unused API settings.
+
+### Omega-era gaps (verified 2026-10-15 on a live ModSecurity host — implement one day)
+
+5. **Chromium missing → headless crawl skips.** `playwright` PyPI package installs, but `chromium-1234/chrome.exe` is absent, so every run logs `Headless crawl skipped`. JS-rendered routes are never seen. Fix (once): `playwright install chromium`. No code change needed — `run_coverage_stage` picks it up automatically.
+
+6. **sqlmap missing → SQLi never confirmed.** `run_extended_tools` logs `Sqlmap unavailable` and continues. Dalfox covers XSS, nothing covers SQLi confirmation. Fix: `python scripts/install_tools.py --only sqlmap` (or `sudo apt install sqlmap`). Bounded (1 URL, level 1/risk 1, 300s) when present.
+
+7. **Gemini auth-key format (post May-2026).** Google AI Studio now issues auth keys (`AQ.Ab...`) instead of `AIza...` standard keys; unrestricted standard keys are rejected. Athena accepts both formats and lets the API decide (`configured_providers()`), but an unrestricted/orphaned key still fails with an empty `LLM call failed (gemini):` line. Fix: AI Studio → key → **Restrict to Gemini API only** + enable `generativelanguage.googleapis.com`. Until then Groq-only (`providers: ['groq']`) is the correct working state.
+
+8. **Single-LLM rate limits on big scans.** Groq free tier 429s after ~70 findings (`rate limited 3x; cooling down 60s`), leaving AI triage degraded. Deterministic dedup still runs, but narratives/flagging thin out. Fix: add `DEEPSEEK_API_KEY` as second failover, or `NVD_API_KEY` (50 req/30s vs 5/30s) to cut keyword-fallback CVE noise (e.g. stale `CVE-1999/2000` Apache guesses).
+
+9. **Dalfox vs WAF tarpitting.** `dalfox run failed ... timed out after 300s` on `/admin.php`, `/config.php.old` — ModSecurity holds the connection open. Bounded per-URL timeout contains it (scan continues), but those URLs get `0 XSS` by timeout, not by proof. Future: adaptive per-host backoff + early WAF-block abort instead of full 300s wait.
+
+10. **No Restricted-Technique confirmation UI in CLI.** `ToolConfirmationPolicy` (nmap/nuclei/metasploit/hydra/kali_shell/sqlmap/persistence) exists and gates `OperationGate`, but CLI runs default `auto_approve` for non-interactive scans. Future: `--confirm-dangerous` interactive Allow/Deny prompt per tool wave (RedAmon has this in chat; Athena needs the CLI equivalent).
 
 ### Recently Added Features
 
