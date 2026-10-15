@@ -831,3 +831,65 @@ criteria). Do NOT start B or C until the operator says so.
 - `tests/test_scan_store.py` (13): record/read/list/counts/exports,
   queue lifecycle + stale requeue, API history/export/status-fallback,
   CLI history/export. Full suite: **1002 passed, 1 skipped**.
+
+---
+
+# Athena Session - 2026-10-15 (OMEGA FUSION DONE, pushed as 8ab7495 + 6b89766)
+
+## Status: RedAmon merged in, Athena stands alone (donor NOT committed)
+
+### What redamon-master/ was
+- RedAmon v6.26.2 (samugit83/redamon, MIT): Docker monorepo
+  (Python 3.11 + Next.js + Neo4j + Postgres), 40+ recon tools, LangGraph
+  agent, CypherFix, TrafficMind, GVM 170k NVTs, XBOW 101/104.
+- Kept as untracked reference at `redamon-master/`. NEVER imported,
+  NEVER committed. `git grep redamon-master -- athena.py modules tests
+  scripts` = empty. Safe to delete; operator keeps it for upstream PR work.
+
+### New modules (13, all pure-Python, zero Docker)
+- `graph_lite.py` — SQLite MERGE attack graph (`~/.athena/graph.db`)
+- `settings_registry.py` — ~17 tunables, stealth caps (`--list-settings`)
+- `hard_guardrail.py` + `roe.py` — gov/mil/edu/int block + RoE JSON (`--roe-file`)
+- `recon_orchestrator.py` — fan-out/fan-in `omega_recon()` (timeout + never-raise)
+- `tls_scan.py`, `vhost_sni.py` (catch-all guard), `origin_discovery.py`
+  (SSRF-guarded 60/25/15), `subdomain_takeover.py` (live-drop verdicts),
+  `graphql_sec.py`, `js_recon.py` (sink downgrade), `serialized_scan.py`
+  (never deserializes), `supply_chain_recon.py` (offline SBOM/OSV)
+
+### Modified
+- `athena.py` — `--no-omega/--omega-tools/--roe-file/--list-settings`,
+  Omega stage after discovery, evidence-only merge into vulnerabilities.
+- `operation_control.py` — `ToolConfirmationPolicy` + hard-guardrail first
+  + RoE overlay (all additive, old tests green).
+- `tool_bridge.py` — `_find_pd_httpx_candidate()`: PATH Python-httpx
+  collision fixed; PD `httpx v1.12.0` installed via
+  `scripts/install_tools.py --only httpx`.
+- `ai_integration.py` — auth-key support (post May-2026 Google format
+  `AQ.Ab...` accepted, API decides); `configured_providers()` simplified.
+- `tests/test_ai_integration.py` — hermetic `.env` mocks (4 tests).
+- `tests/test_omega_fusion.py` (13 tests, new).
+- `README.md` — scan-mode verdicts table (`full`/`all` = GOOD + all-out
+  command), Omega-era gaps 5-10 (chromium, sqlmap, Gemini restrictions,
+  single-LLM 429s, dalfox WAF tarpit, confirm-UI).
+
+### .env (NOT committed, git-ignored)
+- `GEMINI_API_KEY=AQ.Ab...` restored per operator (new AI Studio format).
+- Working set: `ATHENA_AI_PROVIDER=groq`, `GROQ_API_KEY=gsk_...`,
+  `ATHENA_AI_MODEL=openai/gpt-oss-120b`. `providers: [gemini, groq]`.
+
+### Live proof (nacosogitech.com.ng, ModSecurity host)
+- Before: discovery 167s, native 372 [H10/M362], omega 18, graph 71/69,
+  0 confirmed. After: discovery 82s, native 37 [C4/H9/M23/L1],
+  omega 20, graph 96/94, **1 CONFIRMED SSTI Jinja2/Twig (timing oracle)**,
+  CVE 2 -> 12, AI triage 79->63 (16 FP flagged). httpx went
+  unavailable -> probed. Still open: chromium, sqlmap, DeepSeek/NVD keys.
+
+### Tests at push time
+- `test_ai_integration + test_omega_fusion`: 66 passed.
+- Full sweep earlier: 73 + 161 passed batches; pre-existing
+  `athena.py` flake warnings untouched.
+
+## NEXT
+1. `playwright install chromium` + `--only sqlmap` on operator box.
+2. Optional `DEEPSEEK_API_KEY` / `NVD_API_KEY` to end Groq-429 degradation.
+3. Phase 2 Agent-lite (ReAct + Fireteam) when operator calls it.
