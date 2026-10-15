@@ -130,6 +130,44 @@ class AuthorizationResult:
         }
 
 
+class ToolConfirmationPolicy:
+    """Per-tool human-in-the-loop gate (RedAmon port, Athena-safe defaults).
+
+    Dangerous tools pause for Allow/Deny unless auto_approve is set (labs only).
+    Non-dangerous tools always pass. Never raises.
+    """
+
+    DANGEROUS = frozenset({
+        "nmap", "nuclei", "metasploit", "hydra", "kali_shell",
+        "execute_code", "sqlmap", "persistence", "lateral",
+        "controlled_validation",
+    })
+
+    def __init__(self, require_confirmation: bool = True, auto_approve: bool = False):
+        self.require_confirmation = require_confirmation
+        self.auto_approve = auto_approve
+        self._granted: set = set()
+
+    def needs_confirmation(self, tool: str) -> bool:
+        if not self.require_confirmation or self.auto_approve:
+            return False
+        return str(tool or "").lower() in self.DANGEROUS
+
+    def grant(self, tool: str, target: str = "") -> None:
+        self._granted.add(f"{str(tool).lower()}::{target}")
+
+    def is_granted(self, tool: str, target: str = "") -> bool:
+        return f"{str(tool).lower()}::{target}" in self._granted
+
+    def check(self, tool: str, target: str = "") -> Dict[str, Any]:
+        if not self.needs_confirmation(tool):
+            return {"allowed": True, "reason": "not dangerous or auto-approved"}
+        if self.is_granted(tool, target):
+            return {"allowed": True, "reason": "operator granted"}
+        return {"allowed": False, "reason": f"tool {tool!r} requires operator confirmation",
+                "state": "requires_authorization"}
+
+
 class OperationGate:
     """Fail-closed gate enforcing safety and operator controls."""
 
@@ -141,6 +179,7 @@ class OperationGate:
         audit=None,
         confirmation_policy=None,
         cleanup=None,
+        roe=None,
     ):
         self.engagement = engagement
         self.operator = operator or "operator"
@@ -149,6 +188,15 @@ class OperationGate:
         self.confirmation_policy = confirmation_policy
         self.cleanup = cleanup
         self.granted_confirmations: set = set()
+        # RoE + hard guardrail (additive: None = old behaviour preserved)
+        self.roe = roe
+        if confirmation_policy is None:
+            self.confirmation_policy = None
+        elif isinstance(confirmation_policy, ToolConfirmationPolicy):
+            pass
+        else:
+            # legacy: any truthy object with check()/needs_confirmation() duck-typed
+            pass
 
     # -- planning -----------------------------------------------------------
 
@@ -185,10 +233,20 @@ class OperationGate:
     ) -> AuthorizationResult:
         """Run the full gate chain; returns the first denial encountered.
 
-        Chain: engagement → scope → capability → confirmation → rate limit.
+        Chain: hard-guardrail → engagement → scope → RoE → capability →
+               tool-confirmation → confirmation → rate limit.
         """
         self._audit("OPERATION_AUTHORIZE_ATTEMPT", plan, "INITIATED",
                     authorization_decision="PENDING")
+
+        # 0. Non-disableable hard guardrail (gov/mil/edu/int) - always enforced.
+        try:
+            from .hard_guardrail import hard_guardrail_reason as _hgr
+            _hard = _hgr(plan.target)
+            if _hard:
+                return self._deny(plan, StageState.BLOCKED_BY_POLICY, _hard)
+        except Exception:
+            pass
 
         if self.engagement is None:
             return self._deny(
@@ -213,6 +271,38 @@ class OperationGate:
             if not gate.allowed:
                 return self._deny(
                     plan, StageState.BLOCKED_BY_POLICY, gate.reason)
+
+        # RoE overlay (additive): exclusions / technique allowlist / window.
+        if self.roe is not None:
+            try:
+                verdict = self.roe.check(plan.target, plan.technique or "")
+                if not verdict.get("allowed", False):
+                    # scope exclusions map to BLOCKED_BY_SCOPE, rest to POLICY
+                    reason = str(verdict.get("reason", "denied by RoE"))
+                    state = (StageState.BLOCKED_BY_SCOPE
+                             if "exclud" in reason.lower() or "not in" in reason.lower()
+                             else StageState.BLOCKED_BY_POLICY)
+                    return self._deny(plan, state, reason)
+            except Exception:
+                pass
+
+        # Per-tool confirmation gate (additive, only for dangerous tools).
+        try:
+            pol = self.confirmation_policy
+            if pol is not None and hasattr(pol, "check"):
+                tool_name = (plan.technique or plan.action or "").split()[0]
+                verdict = pol.check(tool_name, plan.target)
+                if isinstance(verdict, dict) and not verdict.get("allowed", True):
+                    self._audit("OPERATION_CONFIRMATION_REQUIRED", plan, "DENIED",
+                                authorization_decision="REQUIRES_AUTHORIZATION")
+                    return AuthorizationResult(
+                        allowed=False,
+                        state=StageState.REQUIRES_AUTHORIZATION,
+                        reason=str(verdict.get("reason", "tool confirmation required")),
+                        plan=plan,
+                    )
+        except Exception:
+            pass
 
         if plan.requires_confirmation:
             if not confirmation and plan.id not in self.granted_confirmations:

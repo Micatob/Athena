@@ -341,6 +341,16 @@ Examples:
     orchestration_group.add_argument('--preflight', action='store_true',
                                      help='Explain operations before executing '
                                           '(authorization, scope, expected evidence)')
+
+    omega_group = parser.add_argument_group('Omega Fusion (RedAmon port)')
+    omega_group.add_argument('--no-omega', action='store_true',
+                             help='Skip the Omega recon pack (TLS/GraphQL/takeover/vhost/origin/JS/serialized/supply-chain)')
+    omega_group.add_argument('--omega-tools', default='',
+                             help='Comma list to restrict Omega pack (tls,graphql,takeover,vhost,origin,js,serialized,supply_chain)')
+    omega_group.add_argument('--roe-file',
+                             help='RoE JSON file (targets, exclusions, allowed_techniques, window)')
+    omega_group.add_argument('--list-settings', action='store_true',
+                             help='List the Omega settings registry and exit')
     return parser.parse_args()
 
 
@@ -2670,6 +2680,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
         external_tools: List[Dict[str, Any]] = []
         correlation_stats: Dict[str, Any] = {}
         scan_partial = False
+        omega_results: Dict[str, Any] = {}
 
         # PHASE 0 — WAF gate runs FIRST on every mode that touches HTTP.
         # On resume with a saved discovery stage the gate is skipped: the
@@ -2736,6 +2747,49 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                        "unreachable, or request filtering.")
                 cprint("  [!] Later phases fall back to the target URL only. "
                        "This run will be marked PARTIAL.\n")
+
+        # OMEGA PACK - RedAmon fan-out recon (TLS/GraphQL/takeover/vhost/origin/JS).
+        # Additive: never replaces discovery, only appends evidence-backed findings.
+        # Skip on resume-with-checkpoint, skip with --no-omega, never raises.
+        if (not getattr(args, 'no_omega', False)
+                and args.mode in ('full', 'all', 'discovery', 'recon', 'vuln')
+                and isinstance(discovery_results, dict)):
+            try:
+                _omega_tools = None
+                _raw = (getattr(args, 'omega_tools', '') or '').strip()
+                if _raw:
+                    _omega_tools = [t.strip().lower() for t in _raw.split(',') if t.strip()]
+                # RoE pre-check: hard guardrail + exclusions fail the pack closed.
+                _roe = None
+                if getattr(args, 'roe_file', None):
+                    try:
+                        from modules.roe import load_roe_file as _load_roe
+                        _roe = _load_roe(args.roe_file)
+                        _verdict = _roe.check(target)
+                        if not _verdict.get('allowed', False):
+                            cprint(f"  [!] Omega pack blocked by RoE: {_verdict.get('reason','')}")
+                            _roe = 'blocked'
+                    except Exception as _e:
+                        cprint(f"  [*] RoE file unreadable, continuing without RoE: {_e}")
+                if _roe != 'blocked':
+                    with _phase('omega recon pack'):
+                        from modules.recon_orchestrator import omega_recon as _omega
+                        omega_results = await _omega(target, discovery_results, enabled=_omega_tools)
+                    _of = omega_results.get('findings', []) if isinstance(omega_results, dict) else []
+                    _tools = omega_results.get('tools', []) if isinstance(omega_results, dict) else []
+                    discovery_results['omega'] = omega_results
+                    cprint(f"  [+] Omega pack: {len(_of)} finding(s) from {len(_tools)} tool(s) "
+                           f"in {omega_results.get('duration_s', 0)}s")
+                    try:
+                        from modules.graph_lite import GraphLite as _GL
+                        _g = _GL(engagement_id='omega')
+                        _gs = _g.stats()
+                        cprint(f"  [*] Attack graph: {_gs.get('node_total',0)} nodes / {_gs.get('edge_total',0)} edges")
+                        _g.close()
+                    except Exception:
+                        pass
+            except Exception as _e:
+                cprint(f"  [*] Omega pack skipped: {_e}")
 
         # Prompt-B coverage: form-derived login (when no pre-auth ran) +
         # headless-browser crawl.  Merged URLs feed the vuln stage below;
@@ -2920,6 +2974,39 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
             for summary in external_tools:
                 if isinstance(summary, dict) and summary.get('tool') == 'httpx':
                     _merge_httpx_into_discovery(discovery_results, summary)
+            # Omega findings join the report set (evidence-backed only).
+            # Normalized to the scanner shape so triage/exploitation/report flow untouched.
+            try:
+                _omega_f = ((omega_results or {}).get('findings') or []) if isinstance(omega_results, dict) else []
+                _added = 0
+                for _of in _omega_f:
+                    if not isinstance(_of, dict):
+                        continue
+                    _sev = str(_of.get('severity', 'info')).upper()
+                    if _sev not in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'):
+                        _sev = 'INFO'
+                    # info/dev-references stay in discovery omega payload + graph,
+                    # only actionable tiers become report vulnerabilities.
+                    if _sev in ('INFO',) and str(_of.get('type','')).startswith(('js-dev', 'js-sink')) is False:
+                        if _of.get('verdict') not in ('confirmed', 'likely') and _of.get('type') not in (
+                                'graphql-introspection', 'subdomain-takeover', 'origin-exposure',
+                                'hidden-vhost', 'serialized-candidate', 'mal-package', 'vuln-package'):
+                            continue
+                    vulnerabilities.append({
+                        'type': str(_of.get('type', 'omega-finding')),
+                        'url': str(_of.get('url', _of.get('subdomain', _of.get('vhost', _of.get('ip', target))))),
+                        'severity': _sev,
+                        'description': str(_of.get('description', _of.get('evidence', f"Omega {_of.get('omega_tool','')} finding"))),
+                        'evidence': _of.get('evidence', _of),
+                        'confidence': str(_of.get('verdict', _of.get('confidence', 'medium'))),
+                        'source': f"omega_{_of.get('omega_tool','pack')}",
+                        'verified': _of.get('verdict') == 'confirmed',
+                    })
+                    _added += 1
+                if _added:
+                    cprint(f"  [+] Omega contributed {_added} finding(s) to the report set")
+            except Exception as _e:
+                cprint(f"  [*] Omega merge skipped: {_e}")
             if args.pause:
                 input("  [*] Paused. Press Enter to continue...")
 
@@ -4322,6 +4409,16 @@ async def main():
 
     if getattr(args, 'list_tools', False):
         await show_tool_status()
+        return
+
+    if getattr(args, 'list_settings', False):
+        try:
+            from modules.settings_registry import describe
+            cprint("  OMEGA SETTINGS REGISTRY")
+            for s in describe():
+                cprint(f"  {s['key']:<22} default={s['default']} [{s['type']}] env={s['env']} - {s['help']}")
+        except Exception as exc:
+            cprint(f"[!] settings registry unavailable: {exc}")
         return
 
     if args.list_plugins:

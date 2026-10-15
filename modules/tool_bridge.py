@@ -510,6 +510,34 @@ async def _httpx_is_pd(binary: str) -> bool:
         return False
 
 
+def _find_pd_httpx_candidate() -> Optional[str]:
+    """Scan Athena tools dirs for PD httpx without executing anything.
+
+    Why: ``shutil.which('httpx')`` returns Python's httpx CLI when both are
+    installed. This returns the first file match in the known tools dirs so
+    callers can probe it with ``_httpx_is_pd`` instead of giving up.
+    """
+    try:
+        suffixes = ('.exe', '.cmd', '.bat') if os.name == 'nt' else ('',)
+        for directory in _EXTRA_SEARCH_DIRS:
+            if not directory:
+                continue
+            try:
+                d = os.path.expandvars(directory)
+            except Exception:
+                continue
+            for suffix in suffixes:
+                candidate = os.path.join(d, 'httpx' + suffix)
+                try:
+                    if os.path.isfile(candidate):
+                        return candidate
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return None
+
+
 async def tool_status(tool: str = 'nuclei') -> Dict[str, Any]:
     """Describe an external tool for ``--list-tools`` diagnostics.
 
@@ -522,8 +550,18 @@ async def tool_status(tool: str = 'nuclei') -> Dict[str, Any]:
     }
     try:
         binary = find_binary(tool)
-        if not binary:
-            return status
+        if tool == 'httpx' and binary and not await _httpx_is_pd(binary):
+            # PATH hit is Python's httpx CLI (name collision). Scan the
+            # Athena tools dirs for the real ProjectDiscovery build before
+            # reporting unavailable.
+            alt = _find_pd_httpx_candidate()
+            if alt:
+                binary = alt
+            else:
+                status['binary'] = binary
+                status['note'] = ('found httpx is the Python httpx package, not '
+                                  'ProjectDiscovery httpx')
+                return status
         if tool == 'httpx' and not await _httpx_is_pd(binary):
             status['binary'] = binary
             status['note'] = ('found httpx is the Python httpx package, not '
@@ -1148,9 +1186,13 @@ async def run_httpx(target: str,
     if not binary:
         return _unavailable(tool, tool, f'httpx is not installed - {TOOL_INSTALL_HINTS[tool]}')
     if not await _httpx_is_pd(binary):
-        return _unavailable(tool, binary, 'PATH httpx resolves to Python httpx lib, not ProjectDiscovery httpx '
-                                          '(PD flags rejected) - install PD build + ensure it precedes Python Scripts on PATH '
-                                          '(Kali: sudo apt install httpx-toolkit; Win: go install github.com/projectdiscovery/httpx/cmd/httpx@latest)')
+        alt = _find_pd_httpx_candidate()
+        if alt and alt != binary and await _httpx_is_pd(alt):
+            binary = alt
+        else:
+            return _unavailable(tool, binary, 'PATH httpx resolves to Python httpx lib, not ProjectDiscovery httpx '
+                                              '(PD flags rejected) - install PD build + ensure it precedes Python Scripts on PATH '
+                                              '(Kali: sudo apt install httpx-toolkit; Win: go install github.com/projectdiscovery/httpx/cmd/httpx@latest)')
     argv: List[str] = [binary, '-u', target, '-json', '-silent', '-nc',
                        '-tech-detect', '-status-code', '-title',
                        '-web-server', '-ip', '-follow-redirects',

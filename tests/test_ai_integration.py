@@ -263,12 +263,15 @@ class TestProviderResolution:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setenv("GROQ_API_KEY", "g")
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert resolve_provider() == AIProvider.GROQ
 
     def test_no_keys_falls_back_to_gemini(self, monkeypatch):
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
                      "ATHENA_AI_PROVIDER"):
             monkeypatch.delenv(name, raising=False)
+        # Hermetic: ignore real .env file keys (operator machine may have them)
+        monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert resolve_provider() == AIProvider.GEMINI
 
     def test_default_models_per_provider(self, monkeypatch):
@@ -296,6 +299,7 @@ class TestProviderResolution:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.setenv("GROQ_API_KEY", "g")
+        monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert configured_providers() == [AIProvider.GROQ]
 
 
@@ -577,10 +581,12 @@ class TestEnsembleTriage:
     async def test_no_keys_returns_empty(self, monkeypatch):
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert await ensemble_triage([{"id": "1"}]) == []
 
     @pytest.mark.asyncio
     async def test_aggregates_providers(self, monkeypatch):
+        monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         monkeypatch.setenv("GEMINI_API_KEY", "g-key")
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)

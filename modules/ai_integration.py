@@ -191,9 +191,19 @@ def _setting(name: str, default: str = "") -> str:
 
 
 def configured_providers() -> List[AIProvider]:
-    """All providers that have an API key present in the environment."""
-    return [p for p in PROVIDER_PRIORITY
-            if _env_flag_set(AI_PROVIDERS[p]["env"])]
+    """All providers that have a key present.
+
+    Note (Oct 2026): Google AI Studio now issues auth keys by default
+    (post May-28-2026), which do NOT look like the old AIza... standard
+    keys. We accept any non-empty key and let the API decide - a strict
+    prefix check here just broke every new Gemini key.
+    """
+    out: List[AIProvider] = []
+    for p in PROVIDER_PRIORITY:
+        key = (_setting(AI_PROVIDERS[p]["env"]) or "").strip()
+        if key:
+            out.append(p)
+    return out
 
 
 def resolve_provider(api_key: str = "") -> AIProvider:
