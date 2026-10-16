@@ -1000,15 +1000,24 @@ async def run_extended_tools(target: str,
         try:
             from modules.tool_bridge import run_dalfox as _rd
             disabled = bool(getattr(args, 'no_dalfox', False))
-            # One tarpit host must not burn the full timeout per URL: after
-            # a host times out once, later URLs on it are skipped without
-            # another 300s wait.  Skips are recorded, never silent.
+            # Tarpit discipline (2026-10-16 ogitech: one cpanel host burned
+            # a full wait): after a host times out once, later URLs on
+            # it are skipped without another full wait; after two timeouts
+            # anywhere, the rest of the fan-out is skipped (recorded, never
+            # silent) so one WAF-tarpitted scan cannot stall Phase 3.
             timed_out_hosts: Set[str] = set()
+            timeouts_seen = 0
             for url in dalfox_urls:
                 try:
                     host = (urllib.parse.urlsplit(url).hostname or '').lower()
                 except Exception:
                     host = ''
+                if timeouts_seen >= 2:
+                    results.append({**_skip, 'tool': 'dalfox',
+                                    'reason': ('two dalfox probes already timed out - '
+                                               'remaining fan-out skipped to protect scan time'),
+                                    'target': url})
+                    continue
                 if host and host in timed_out_hosts:
                     results.append({**_skip, 'tool': 'dalfox',
                                     'reason': (f'host {host} timed out on an '
@@ -1023,10 +1032,11 @@ async def run_extended_tools(target: str,
                     continue
                 if summary:
                     results.append(summary)
-                    if (host
-                            and str(summary.get('status')) == 'failed'
+                    if (str(summary.get('status')) == 'failed'
                             and str(summary.get('reason', '')).startswith('timed out')):
-                        timed_out_hosts.add(host)
+                        timeouts_seen += 1
+                        if host:
+                            timed_out_hosts.add(host)
                 if any(int(s.get('matched', 0) or 0) > 0 for s in results):
                     break  # one confirmed XSS is enough signal; keep phase bounded
         except Exception as exc:  # pragma: no cover

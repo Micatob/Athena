@@ -403,10 +403,17 @@ async def run_nuclei(target: str,
     result = await _execute_nuclei(argv, timeout)
 
     if not result['ok']:
+        blob = (str(result.get('stdout') or '')
+                + '\n' + str(result.get('stderr') or ''))
         if result.get('timeout'):
             status, reason = 'failed', f'timed out after {timeout:g}s'
-        elif result.get('failed_to_start'):
-            status, reason = 'failed', str(result.get('stderr'))[:200]
+        elif result.get('failed_to_start') or _is_launch_failure(blob):
+            return _unavailable_launch(
+                tool, binary,
+                (str(result.get('stderr')) or blob).strip()[:200]
+                or 'failed to start',
+                result.get('duration_s', 0.0),
+                ['<binary>', *argv[1:]])
         else:
             status = 'failed'
             reason = (str(result.get('stderr')).strip()
@@ -469,12 +476,86 @@ _VERSION_ARGV = {
     'httpx': ['-version'],
 }
 
-#: Wall-clock budgets per tool (seconds).  sqlmap/dalfox do live
-#: injection attempts, so they get minutes; wafw00f/httpx are quick probes.
-SQLMAP_TIMEOUT = 300.0
-DALFOX_TIMEOUT = 300.0
-WAFW00F_TIMEOUT = 60.0
-HTTPX_TIMEOUT = 120.0
+#: Wall-clock budgets per tool (seconds).  sqlmap does live injection
+#: attempts so it gets minutes; dalfox single-URL probes typically finish
+#: in 5-30s (live 2026-10-16: 5-8s clean, 32s R-only) so 90s bounds the
+#: WAF-tarpit case without burning 300s per URL; wafw00f/httpx are quick.
+SQLMAP_TIMEOUT = 150.0
+DALFOX_TIMEOUT = 90.0
+WAFW00F_TIMEOUT = 30.0
+HTTPX_TIMEOUT = 60.0
+
+#: Substrings proving the tool binary never started (broken shim, missing
+#: tree entry, denied execution).  Checked against stdout+stderr together
+#: for EVERY adapter - a launch failure is ``unavailable`` + reinstall
+#: hint, never a scary ``failed``.  Keep lowercase; matching is case-folded.
+_LAUNCH_FAILURE_MARKERS = (
+    "can't open file",
+    'cannot open file',
+    'no such file',
+    'not recognized as an internal',
+    'not recognized',
+    'permission denied',
+    'access is denied',
+)
+
+#: Install commands per tool for the unavailable-launch hint.
+_REINSTALL_HINTS = {
+    'nuclei': 'python scripts/install_tools.py --only nuclei',
+    'sqlmap': 'python scripts/install_tools.py --only sqlmap',
+    'dalfox': 'python scripts/install_tools.py --only dalfox',
+    'wafw00f': 'pip install -U wafw00f',
+    'httpx': 'python scripts/install_tools.py --only httpx',
+}
+
+
+def _is_launch_failure(blob: str) -> bool:
+    """True when ``blob`` (stdout+stderr) proves the tool never started."""
+    lowered = (blob or '').lower()
+    return any(m in lowered for m in _LAUNCH_FAILURE_MARKERS)
+
+
+def _unavailable_launch(tool: str, binary: str, reason: str,
+                        duration_s: float, argv: List[str]) -> Dict[str, Any]:
+    """Shared broken-launch result: ``unavailable`` + reinstall hint."""
+    hint = _REINSTALL_HINTS.get(tool, '')
+    full = (f'{tool} launch is broken ({reason[:150]}) - '
+            f're-run: {hint}' if hint else
+            f'{tool} launch is broken ({reason[:150]})')
+    return {'tool': tool, 'status': 'unavailable', 'binary': binary,
+            'reason': full, 'findings': [], 'matched': 0,
+            'duration_s': duration_s, 'argv': argv}
+
+
+def _is_timeout_reason(reason: str) -> bool:
+    return str(reason or '').lower().startswith('timed out')
+
+
+def _sqlmap_entry_point() -> Optional[str]:
+    """Absolute path to the installed sqlmap tree entry, or None.
+
+    The ``sqlmap.cmd`` shim calls bare ``python`` and breaks whenever the
+    tree is missing or PATH resolves elsewhere.  Running
+    ``sys.executable + sqlmap.py`` directly bypasses the shim entirely.
+    """
+    try:
+        for directory in _EXTRA_SEARCH_DIRS:
+            if not directory:
+                continue
+            try:
+                d = os.path.expandvars(directory)
+            except Exception:
+                continue
+            entry = os.path.join(d, 'sqlmap', 'sqlmap.py')
+            try:
+                if os.path.isfile(entry):
+                    return entry
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
 
 #: Caps so one noisy engine cannot stall the scan or flood the report.
 SQLMAP_MAX_URLS = 3
@@ -601,6 +682,9 @@ def nuclei_notice(summary: Optional[Dict[str, Any]]) -> str:
         return '  [*] Nuclei disabled (--no-nuclei)'
     if status == 'unavailable':
         return f"  [*] Nuclei unavailable: {summary.get('reason', '')}"
+    if status == 'failed' and _is_timeout_reason(str(summary.get('reason', ''))):
+        return (f"  [*] Nuclei: {summary.get('reason', '')} - "
+                f"skipped as inconclusive, not a clean miss")
     return f"  [!] Nuclei failed: {summary.get('reason', 'unknown error')}"
 
 
@@ -690,18 +774,36 @@ async def run_sqlmap(url: str,
                      extra_args: Sequence[str] = (),
                      enabled: bool = True) -> Dict[str, Any]:
     """Confirm SQL injection in ``url`` with sqlmap.  Never raises."""
+    import sys as _sys
     tool = 'sqlmap'
     if not enabled:
         return {**_unavailable(tool, '', 'disabled by --no-sqlmap'),
                 'status': 'disabled'}
     if not url:
         return {**_unavailable(tool, '', 'no target'), 'status': 'skipped'}
-    binary = binary or find_binary(tool)
-    if not binary:
-        return _unavailable(tool, tool, f'sqlmap is not installed - {TOOL_INSTALL_HINTS[tool]}')
+    # Prefer the tree entry directly: ``sys.executable + sqlmap.py`` never
+    # touches the ``sqlmap.cmd`` shim (bare ``python``, PATH-dependent,
+    # slow via asyncio).  An explicit ``binary`` (tests) still wins.
+    entry = _sqlmap_entry_point()
+    if binary is None and entry:
+        argv_prefix: List[str] = [_sys.executable, entry]
+        binary_label = entry
+    else:
+        binary = binary or find_binary(tool)
+        if not binary:
+            return _unavailable(tool, tool, f'sqlmap is not installed - {TOOL_INSTALL_HINTS[tool]}')
+        # A caller-handed ``sqlmap.cmd``/.bat shim is still routed through
+        # the entry point when the tree exists - same command, no shim.
+        if entry and str(binary).lower().endswith(('.cmd', '.bat')):
+            argv_prefix = [_sys.executable, entry]
+            binary_label = entry
+        else:
+            argv_prefix = [binary]
+            binary_label = binary
+    binary = binary_label
     tmpdir = tempfile.mkdtemp(prefix='athena-sqlmap-')
     argv: List[str] = [
-        binary, '-u', url,
+        *argv_prefix, '-u', url,
         '--batch', '--level', '1', '--risk', '1',
         '--smart', '--timeout', '10', '--retries', '1',
         '--threads', '1', '--output-dir', tmpdir,
@@ -721,36 +823,45 @@ async def run_sqlmap(url: str,
             _shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
-    if not result.get('ok'):
-        if result.get('timeout'):
-            reason = f'timed out after {timeout:g}s'
-        elif result.get('failed_to_start'):
-            reason = str(result.get('stderr'))[:200]
-        else:
-            reason = (str(result.get('stderr')).strip()
-                      or f"exit code {result.get('returncode')}")
-            reason = reason.splitlines()[0] if reason else 'unknown error'
-        # A launch that never reached sqlmap (missing tree entry point,
-        # broken shim, denied execution) is a broken install, not a scan
-        # result - report unavailable with the fix, never a scary failure.
-        _launch_markers = ('can\'t open file', 'no such file', 'not recognized',
-                           'permission denied', 'access is denied')
-        if any(m in reason.lower() for m in _launch_markers):
-            return {'tool': tool, 'status': 'unavailable', 'binary': binary,
-                    'reason': (f'sqlmap launch is broken ({reason[:150]}) - '
-                               f're-run: python scripts/install_tools.py --only sqlmap'),
-                    'findings': [], 'matched': 0,
-                    'duration_s': result.get('duration_s', 0.0),
-                    'argv': ['<binary>', *argv[1:]]}
+    stdout = str(result.get('stdout') or '')
+    stderr = str(result.get('stderr') or '')
+    # Evidence first: a Parameter block is proof even on non-zero exit.
+    findings = parse_sqlmap_stdout(stdout, url)
+    if findings:
+        return {'tool': tool, 'status': 'executed', 'binary': binary,
+                'reason': '', 'findings': findings, 'matched': len(findings),
+                'duration_s': result.get('duration_s', 0.0),
+                'argv': ['<binary>', *argv[1:]],
+                'returncode': result.get('returncode'), 'target': url}
+    # Clean miss: sqlmap ran and said not injectable (exit 0, no blocks).
+    if result.get('ok'):
+        return {'tool': tool, 'status': 'executed', 'binary': binary,
+                'reason': '', 'findings': [], 'matched': 0,
+                'duration_s': result.get('duration_s', 0.0),
+                'argv': ['<binary>', *argv[1:]],
+                'returncode': result.get('returncode'), 'target': url}
+    if result.get('timeout'):
+        reason = f'timed out after {timeout:g}s'
         logger.warning('sqlmap run failed for %s: %s', url, reason)
         return {'tool': tool, 'status': 'failed', 'binary': binary,
                 'reason': reason[:300], 'findings': [], 'matched': 0,
                 'duration_s': result.get('duration_s', 0.0),
                 'argv': ['<binary>', *argv[1:]],
-                'returncode': result.get('returncode')}
-    findings = parse_sqlmap_stdout(str(result.get('stdout') or ''), url)
-    return {'tool': tool, 'status': 'executed', 'binary': binary, 'reason': '',
-            'findings': findings, 'matched': len(findings),
+                'returncode': result.get('returncode'), 'target': url}
+    # A launch that never reached sqlmap (missing tree entry point,
+    # broken shim, denied execution) is a broken install, not a scan
+    # result - report unavailable with the fix, never a scary failure.
+    # Check BOTH streams: the python launcher error can land anywhere.
+    if result.get('failed_to_start') or _is_launch_failure(stdout + '\n' + stderr):
+        blob = (stderr.strip() or stdout.strip())[:200]
+        return _unavailable_launch(tool, binary, blob or 'failed to start',
+                                   result.get('duration_s', 0.0),
+                                   ['<binary>', *argv[1:]])
+    reason = (stderr.strip() or f"exit code {result.get('returncode')}")
+    reason = reason.splitlines()[0] if reason else 'unknown error'
+    logger.warning('sqlmap run failed for %s: %s', url, reason)
+    return {'tool': tool, 'status': 'failed', 'binary': binary,
+            'reason': reason[:300], 'findings': [], 'matched': 0,
             'duration_s': result.get('duration_s', 0.0),
             'argv': ['<binary>', *argv[1:]],
             'returncode': result.get('returncode'), 'target': url}
@@ -772,6 +883,11 @@ def sqlmap_notice(summary: Optional[Dict[str, Any]]) -> str:
         return f"  [*] Sqlmap unavailable: {summary.get('reason', '')}"
     if status == 'skipped':
         return ''
+    if _is_timeout_reason(str(summary.get('reason', ''))):
+        target = str(summary.get('target', '') or '')
+        at = f" on {target}" if target else ""
+        return (f"  [*] Sqlmap: {summary.get('reason', '')}{at} - "
+                f"skipped as inconclusive, not a clean miss")
     return f"  [!] Sqlmap failed: {summary.get('reason', 'unknown error')}"
 
 
@@ -903,46 +1019,53 @@ async def run_dalfox(target: str,
         return {'tool': tool, 'status': 'failed', 'binary': binary,
                 'reason': str(exc)[:300], 'findings': [], 'matched': 0,
                 'duration_s': 0.0, 'argv': ['<binary>', *argv[1:]]}
-    # Dalfox exits 1 when findings exist (CI-gate convention) - that is
-    # success with evidence, not failure.
+    # Envelope first: dalfox always prints a JSON envelope with a
+    # ``findings`` list when it ran (exit 0 clean, exit 1 R-or-V, exit 2
+    # skipped/unreachable).  A parseable envelope IS proof the tool ran -
+    # exit code and stderr chatter never override it.  Only V counts as a
+    # finding (R/A/I are explicitly not claims); R-only is a clean miss.
+    # Live 2026-10-16: /webmail/login returns R-only + exit 1 + empty
+    # stderr - clean miss, never a scary [!] line.
     stdout = str(result.get('stdout') or '')
+    stderr = str(result.get('stderr') or '')
     findings = parse_dalfox_json(stdout, target)
-    # Exit 2 with a well-formed empty-findings envelope means dalfox ran but
-    # got no scannable response (blocked / timeout / refused).  That is an
-    # executed attempt against an unresponsive host - never a clean "no XSS"
-    # and never a crash worth a scary [!] line.
-    if (not findings and result.get('returncode') == 2
-            and '"findings"' in stdout and 'dalfox_version' in stdout):
-        return {'tool': tool, 'status': 'executed', 'binary': binary,
-                'reason': ('no scannable response (blocked, timeout, or refused) - '
-                           'not a clean XSS miss'),
-                'findings': [], 'matched': 0,
-                'duration_s': result.get('duration_s', 0.0),
-                'argv': ['<binary>', *argv[1:]],
-                'returncode': 2, 'target': target}
+    has_envelope = ('"findings"' in stdout and 'dalfox_version' in stdout)
     if findings:
+        # V confirmed - success with evidence whatever the exit code.
         return {'tool': tool, 'status': 'executed', 'binary': binary, 'reason': '',
                 'findings': findings, 'matched': len(findings),
+                'duration_s': result.get('duration_s', 0.0),
+                'argv': ['<binary>', *argv[1:]],
+                'returncode': result.get('returncode'), 'target': target}
+    if has_envelope:
+        # Ran fine, nothing verified.  Exit 2 (skipped/unreachable) stays
+        # an executed attempt with an honest reason - never a clean miss
+        # and never a crash.  Exits 0/1 with R-only or empty are clean.
+        if result.get('returncode') == 2:
+            return {'tool': tool, 'status': 'executed', 'binary': binary,
+                    'reason': ('no scannable response (blocked, timeout, or refused) - '
+                               'not a clean XSS miss'),
+                    'findings': [], 'matched': 0,
+                    'duration_s': result.get('duration_s', 0.0),
+                    'argv': ['<binary>', *argv[1:]],
+                    'returncode': 2, 'target': target}
+        return {'tool': tool, 'status': 'executed', 'binary': binary,
+                'reason': '', 'findings': [], 'matched': 0,
                 'duration_s': result.get('duration_s', 0.0),
                 'argv': ['<binary>', *argv[1:]],
                 'returncode': result.get('returncode'), 'target': target}
     if not result.get('ok'):
         if result.get('timeout'):
             reason = f'timed out after {timeout:g}s'
+        elif result.get('failed_to_start') or _is_launch_failure(stdout + '\n' + stderr):
+            blob = (stderr.strip() or stdout.strip())[:200] or 'failed to start'
+            return _unavailable_launch(tool, binary, blob,
+                                       result.get('duration_s', 0.0),
+                                       ['<binary>', *argv[1:]])
         else:
-            reason = (str(result.get('stderr')).strip()
+            reason = (stderr.strip()
                       or f"exit code {result.get('returncode')}")
             reason = reason.splitlines()[0] if reason else 'unknown error'
-        # Exit 1 with no findings and empty stderr is dalfox's quiet
-        # "nothing found", not a crash - report it as an executed clean
-        # miss so the console stays honest without scary [!] lines.
-        # Anything with stderr text stays failed (real error, keep it loud).
-        if result.get('returncode') == 1 and not str(result.get('stderr')).strip():
-            return {'tool': tool, 'status': 'executed', 'binary': binary,
-                    'reason': '', 'findings': [], 'matched': 0,
-                    'duration_s': result.get('duration_s', 0.0),
-                    'argv': ['<binary>', *argv[1:]],
-                    'returncode': 1, 'target': target}
         if reason:
             logger.warning('dalfox run failed for %s: %s', target, reason)
             return {'tool': tool, 'status': 'failed', 'binary': binary,
@@ -1082,6 +1205,12 @@ async def run_wafw00f(target: str,
                 'reason': str(exc)[:300], 'findings': [], 'matched': 0,
                 'duration_s': 0.0, 'argv': ['<binary>', *argv[1:]]}
     stdout = str(result.get('stdout') or '')
+    stderr = str(result.get('stderr') or '')
+    if result.get('failed_to_start') or _is_launch_failure(stdout + '\n' + stderr):
+        blob = (stderr.strip() or stdout.strip())[:200] or 'failed to start'
+        return _unavailable_launch(tool, binary, blob,
+                                   result.get('duration_s', 0.0),
+                                   ['<binary>', *argv[1:]])
     parsed = parse_wafw00f_text(stdout, target)
     findings: List[Dict[str, Any]] = []
     if parsed['detected']:
@@ -1097,12 +1226,20 @@ async def run_wafw00f(target: str,
             'confidence': 'high',
             'verified': False,
         })
-    if not result.get('ok') and not findings and result.get('returncode') not in (0, None):
-        reason = (str(result.get('stderr')).strip() or stdout.strip()
-                  or f"exit code {result.get('returncode')}")
-        reason = reason.splitlines()[0] if reason else 'unknown error'
+    if findings:
+        return {'tool': tool, 'status': 'executed', 'binary': binary, 'reason': '',
+                'findings': findings, 'matched': len(findings),
+                'waf': parsed.get('waf', ''), 'waf_detected': parsed['detected'],
+                'duration_s': result.get('duration_s', 0.0),
+                'argv': ['<binary>', *argv[1:]],
+                'returncode': result.get('returncode'), 'target': target}
+    if not result.get('ok'):
         if result.get('timeout'):
             reason = f'timed out after {timeout:g}s'
+        else:
+            reason = (stderr.strip() or stdout.strip()
+                      or f"exit code {result.get('returncode')}")
+            reason = reason.splitlines()[0] if reason else 'unknown error'
         logger.warning('wafw00f run failed for %s: %s', target, reason)
         return {'tool': tool, 'status': 'failed', 'binary': binary,
                 'reason': reason[:300], 'findings': [], 'matched': 0,
@@ -1133,6 +1270,9 @@ def wafw00f_notice(summary: Optional[Dict[str, Any]]) -> str:
         return f"  [*] Wafw00f unavailable: {summary.get('reason', '')}"
     if status == 'skipped':
         return ''
+    if _is_timeout_reason(str(summary.get('reason', ''))):
+        return (f"  [*] Wafw00f: {summary.get('reason', '')} - "
+                f"skipped as inconclusive, not a clean miss")
     return f"  [!] Wafw00f failed: {summary.get('reason', 'unknown error')}"
 
 
@@ -1236,16 +1376,32 @@ async def run_httpx(target: str,
                 'reason': str(exc)[:300], 'findings': [], 'matched': 0,
                 'hosts': [], 'duration_s': 0.0, 'argv': ['<binary>', *argv[1:]]}
     stdout = str(result.get('stdout') or '')
+    stderr = str(result.get('stderr') or '')
+    if result.get('failed_to_start') or _is_launch_failure(stdout + '\n' + stderr):
+        blob = (stderr.strip() or stdout.strip())[:200] or 'failed to start'
+        result_unavail = _unavailable_launch(tool, binary, blob,
+                                             result.get('duration_s', 0.0),
+                                             ['<binary>', *argv[1:]])
+        result_unavail['hosts'] = []
+        return result_unavail
     # Older httpx builds may reject one of the probe flags; retry once bare.
-    if not result.get('ok') and _flag_rejected(str(result.get('stderr') or '')):
+    if not result.get('ok') and _flag_rejected(stderr):
         argv = [binary, '-u', target, '-json', '-silent']
         result = await _run_process(argv, timeout)
         stdout = str(result.get('stdout') or '')
+        stderr = str(result.get('stderr') or '')
+        if result.get('failed_to_start') or _is_launch_failure(stdout + '\n' + stderr):
+            blob = (stderr.strip() or stdout.strip())[:200] or 'failed to start'
+            result_unavail = _unavailable_launch(tool, binary, blob,
+                                                 result.get('duration_s', 0.0),
+                                                 ['<binary>', *argv[1:]])
+            result_unavail['hosts'] = []
+            return result_unavail
     if not result.get('ok') and not stdout.strip():
         if result.get('timeout'):
             reason = f'timed out after {timeout:g}s'
         else:
-            reason = (str(result.get('stderr')).strip()
+            reason = (stderr.strip()
                       or f"exit code {result.get('returncode')}")
             reason = reason.splitlines()[0] if reason else 'unknown error'
         logger.warning('httpx run failed for %s: %s', target, reason)
@@ -1279,6 +1435,9 @@ def httpx_notice(summary: Optional[Dict[str, Any]]) -> str:
         return f"  [*] Httpx unavailable: {summary.get('reason', '')}"
     if status == 'skipped':
         return ''
+    if _is_timeout_reason(str(summary.get('reason', ''))):
+        return (f"  [*] Httpx: {summary.get('reason', '')} - "
+                f"skipped as inconclusive, not a clean miss")
     return f"  [!] Httpx failed: {summary.get('reason', 'unknown error')}"
 
 

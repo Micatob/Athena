@@ -68,6 +68,7 @@ def test_sqlmap_chatter_without_parameter_is_not_evidence():
 
 def test_sqlmap_missing_binary_is_structured_skip(monkeypatch):
     monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): None)
+    monkeypatch.setattr(tb, '_sqlmap_entry_point', lambda: None)
     out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
     assert out['status'] == 'unavailable'
     assert out['findings'] == []
@@ -87,6 +88,7 @@ def test_sqlmap_executes_and_reports(monkeypatch):
         return {'ok': True, 'stdout': SQLMAP_VULN, 'stderr': '',
                 'returncode': 0, 'duration_s': 3.0}
 
+    monkeypatch.setattr(tb, '_sqlmap_entry_point', lambda: None)
     monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): '/opt/sqlmap')
     monkeypatch.setattr(tb, '_run_process', _run)
     out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
@@ -108,6 +110,7 @@ def test_sqlmap_broken_launch_is_unavailable_with_reinstall_hint(monkeypatch):
                            "[Errno 2] No such file or directory"),
                 'returncode': 1, 'duration_s': 0.1}
 
+    monkeypatch.setattr(tb, '_sqlmap_entry_point', lambda: None)
     monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): '/opt/sqlmap.cmd')
     monkeypatch.setattr(tb, '_run_process', _run)
     out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
@@ -121,11 +124,14 @@ def test_sqlmap_timeout_stays_failed(monkeypatch):
         return {'ok': False, 'stdout': '', 'stderr': '', 'returncode': None,
                 'timeout': True, 'duration_s': 300.0}
 
+    monkeypatch.setattr(tb, '_sqlmap_entry_point', lambda: None)
     monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): '/opt/sqlmap')
     monkeypatch.setattr(tb, '_run_process', _run)
     out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
     assert out['status'] == 'failed'
     assert out['reason'].startswith('timed out')
+    assert tb.sqlmap_notice({**out, 'target': 'https://t.example/?id=1'}).startswith('  [*]')
+    assert 'inconclusive' in tb.sqlmap_notice({**out, 'target': 'https://t.example/?id=1'})
 
 
 # -- dalfox ------------------------------------------------------------------
@@ -311,6 +317,8 @@ def test_extended_tools_degrade_cleanly_when_nothing_installed(monkeypatch, caps
 
     monkeypatch.setattr(athena, '_quick_reachable', _reachable)
     monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): None)
+    monkeypatch.setattr(tb, '_sqlmap_entry_point', lambda: None)
+    monkeypatch.setattr(tb, '_find_pd_httpx_candidate', lambda: None)
     args = argparse.Namespace(no_sqlmap=False, no_dalfox=False, no_wafw00f=False, no_httpx=False)
     out = asyncio_run(athena.run_extended_tools('https://t.example/', args, ['https://t.example/']))
     assert isinstance(out, list)
@@ -517,3 +525,109 @@ def test_dalfox_console_stays_compact_on_mixed_outcomes(monkeypatch, capsys):
              if "Dalfox:" in line]
     assert len(lines) <= 4
     assert any("across 6 URL(s)" in line for line in lines)
+
+
+# -- 2026-10-16 wave: direct entry, cross-tool launch honesty, tones --------
+
+def test_sqlmap_prefers_direct_entry_over_cmd_shim(monkeypatch):
+    import sys
+    seen = {}
+
+    async def _run(argv, timeout):
+        seen['argv'] = list(argv)
+        return {'ok': True, 'stdout': '', 'stderr': '',
+                'returncode': 0, 'duration_s': 1.0}
+
+    monkeypatch.setattr(tb, '_sqlmap_entry_point',
+                        lambda: r'C:\tools\sqlmap\sqlmap.py')
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): r'C:\tools\sqlmap.cmd')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
+    assert out['status'] == 'executed'
+    assert seen['argv'][0] == sys.executable
+    assert seen['argv'][1] == r'C:\tools\sqlmap\sqlmap.py'
+    assert '--batch' in seen['argv']
+
+
+def test_sqlmap_stdout_launch_marker_is_unavailable(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False,
+                'stdout': "C:\\Python\\python.exe: can't open file "
+                          "'C:\\tools\\sqlmap\\sqlmap.py': [Errno 2]",
+                'stderr': '', 'returncode': 1, 'duration_s': 0.1}
+
+    monkeypatch.setattr(tb, '_sqlmap_entry_point', lambda: None)
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/sqlmap')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
+    assert out['status'] == 'unavailable'
+    assert 'install_tools.py --only sqlmap' in out['reason']
+
+
+def test_launch_markers_shared_across_tools(monkeypatch):
+    async def _broken(argv, timeout):
+        return {'ok': False, 'stdout': '',
+                'stderr': "'dalfox' is not recognized as an internal command",
+                'returncode': 1, 'duration_s': 0.1}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/tool')
+    monkeypatch.setattr(tb, '_run_process', _broken)
+    for runner, arg in ((tb.run_dalfox, 'https://t.example/'),
+                        (tb.run_wafw00f, 'https://t.example/'),
+                        (tb.run_httpx, 'https://t.example/'),
+                        (tb.run_nuclei, 'https://t.example/')):
+        out = asyncio_run(runner(arg))
+        assert out['status'] == 'unavailable', runner.__name__
+        assert 're-run' in out['reason'] or 'install' in out['reason'].lower()
+
+
+def test_timeout_notices_are_info_tone_not_alarm():
+    for notice, summary in (
+            (tb.sqlmap_notice, {'tool': 'sqlmap', 'status': 'failed',
+                                'reason': 'timed out after 150s',
+                                'target': 'https://t.example/?id=1'}),
+            (tb.nuclei_notice, {'tool': 'nuclei', 'status': 'failed',
+                                'reason': 'timed out after 900s'}),
+            (tb.wafw00f_notice, {'tool': 'wafw00f', 'status': 'failed',
+                                 'reason': 'timed out after 30s'}),
+            (tb.httpx_notice, {'tool': 'httpx', 'status': 'failed',
+                               'reason': 'timed out after 60s'})):
+        line = notice(summary)
+        assert line.startswith('  [*]'), summary['tool']
+        assert 'inconclusive' in line
+        assert '[!]' not in line
+
+
+def test_dalfox_circuit_breaker_after_two_timeouts(monkeypatch, capsys):
+    """Two timeouts anywhere stop the rest of the fan-out (recorded)."""
+    import athena
+
+    async def _reachable(url, timeout=10.0):
+        return True
+
+    monkeypatch.setattr(athena, "_quick_reachable", _reachable)
+    calls = []
+
+    async def _fake_dalfox(target, binary=None, timeout=90.0, extra_args=(),
+                           enabled=True):
+        calls.append(target)
+        return {'tool': 'dalfox', 'status': 'failed', 'binary': '/opt/dalfox',
+                'reason': 'timed out after 90s', 'findings': [], 'matched': 0,
+                'duration_s': 90.0, 'argv': [], 'target': target}
+
+    monkeypatch.setattr(tb, "run_dalfox", _fake_dalfox)
+    monkeypatch.setattr(tb, "find_binary", lambda name, extra_dirs=(): None)
+    args = argparse.Namespace(no_sqlmap=True, no_dalfox=False,
+                              no_wafw00f=True, no_httpx=True)
+    urls = [f"https://h{i}.example/" for i in range(4)]
+    out = asyncio_run(athena.run_extended_tools(
+        "https://h0.example/", args, urls))
+
+    dalfox_rows = [s for s in out if s.get("tool") == "dalfox"]
+    assert len(dalfox_rows) == 4  # 2 timeouts + 2 recorded skips
+    assert calls == urls[:2]
+    assert any('already timed out' in str(s.get('reason', ''))
+               for s in dalfox_rows[2:])

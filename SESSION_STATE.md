@@ -1010,3 +1010,78 @@ Operator's live scan (ogitech.edu.ng) showed three failures at once:
   lines while the report keeps all 9.
 - Full suite in halves: **592 + 459 = 1051 passed, 1 skipped**.
 - flake8 (CI rule): 0 new violations (athena.py steady at 125).
+
+---
+
+# Athena Session - 2026-10-16 (external-tools root-cause wave, UNCOMMITTED)
+
+## Why the ogitech scan still looked broken
+- Operator's ogitech scan (06:26-06:32) ran BEFORE `6266058` landed
+  (06:50), so none of that fix was in the tree during the scan. The
+  `sqlmap can't open file`, `[!] Dalfox failed: exit code 1`, and
+  `[!] Dalfox failed: timed out after 300s` lines are pre-fix behavior.
+- This wave removes the root causes so a rescan cannot reproduce them.
+
+## Root causes found (live repro on this box)
+1. **sqlmap shim fragility.** `find_binary('sqlmap')` returns `sqlmap.cmd`,
+   which calls bare `python` + tree entry. Any missing tree / PATH drift
+   = `can't open file ... sqlmap.py`. Version probe via `.cmd` also
+   flaked (`--list-tools` once showed `sqlmap: timeout`, 6-8s startup).
+2. **dalfox exit-1 too strict.** `/webmail/login` returns R-only
+   (reflected, not verified) + exit 1 + empty stderr - a clean miss, but
+   any stderr warning text flipped it to scary `[!] failed`. Envelope was
+   not authoritative.
+3. **300s per-probe timeouts.** Dalfox 10 URLs x 300s + sqlmap 300s =
+   404.7s external-tools phase in the operator log, stalling Phase 3.
+   Same-host skip existed but `cpanel.ogitech.edu.ng` (other host) still
+   burned a full 300s.
+
+## Fixes (across EVERY tool, not just the two that complained)
+- `modules/tool_bridge.py`:
+  - Shared `_LAUNCH_FAILURE_MARKERS` / `_is_launch_failure()` /
+    `_unavailable_launch()` used by nuclei/sqlmap/dalfox/wafw00f/httpx
+    (stdout+stderr checked; broken launch = `unavailable` + reinstall
+    hint, never `failed`).
+  - `_sqlmap_entry_point()` + `run_sqlmap` runs
+    `sys.executable + sqlmap/sqlmap.py` directly whenever the tree
+    exists (explicit binary still wins for tests); evidence-first
+    (Parameter block = executed even on non-zero exit).
+  - `run_dalfox` is envelope-first: parseable `"findings"` envelope =
+    `executed` regardless of exit code/stderr; R-only = clean miss;
+    exit 2 envelope = executed with `no scannable response` reason;
+    only envelope-less non-zero exits are `failed`.
+  - Timeouts bounded down: sqlmap 300->150s, dalfox 300->90s, wafw00f
+    60->30s, httpx 120->60s. All four timeout notices are `[*] ...
+    skipped as inconclusive` (was `[!]` everywhere except dalfox).
+- `scripts/install_tools.py`: sqlmap shim now embeds absolute
+  `sys.executable` (never bare `python`); reinstall repairs stale shims
+  (verified live on this box). `verify()` reports the Python-httpx vs
+  PD-httpx collision honestly instead of a false FOUND.
+- `athena.py` dalfox fan-out: keeps same-host skip, ADDS stop-after-two-
+  timeouts circuit breaker (remaining URLs recorded-skipped, report keeps
+  every row). `modules/settings_registry.py` defaults match new caps.
+- `README.md`: tool caps + tarpit gap 9 updated (no more 300s claims).
+
+## Tests (7 new, 2 updated)
+- Bridge/fan-out (in `test_external_tools.py`): direct-entry argv,
+  stdout-marker unavailable, shared launch markers x4 tools, all-timeout
+  `[*]` tones, two-timeout circuit breaker.
+- `test_tool_bridge.py`: exit-1 empty without envelope is now `failed`;
+  NEW R-only envelope clean + R-only-with-stderr-warning clean (the exact
+  ogitech `/webmail/login` shape).
+- Updated hermetic mocks (`_sqlmap_entry_point`, PD-httpx candidate) so
+  dev-box installs don't leak into unit tests.
+- Full suite: **1008 + 50 = 1058 passed, 1 skipped** (was 1051).
+- flake8 (CI rule): 0 new violations (athena.py steady at 125; other
+  touched files match pre-existing baseline).
+- Live smoke: `run_sqlmap(example.com/?id=1)` executed clean 15s via
+  direct entry; `run_dalfox(example.com)` executed clean 5s; R-only +
+  stderr warning stays clean; `--list-tools` all 5 honest.
+
+## Rescan advice (ogitech)
+- Tree + `sqlmap.cmd` shim already repaired on this box; just rescan -
+  expect `Sqlmap: 0 ...` (not unavailable), no `[!] Dalfox failed:
+  exit code 1` for R-only URLs, and dalfox timeouts as `[*] ... 90s ...
+  inconclusive` with the fan-out stopping after two.
+- If the site still blocks (two full scans + fan-outs tripped it before),
+  wait for the block to lift / delist in CSF before rescanning.

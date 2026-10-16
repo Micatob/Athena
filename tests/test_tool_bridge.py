@@ -528,11 +528,32 @@ def test_dalfox_notice_unreachable_is_info_not_alarm():
     assert 'not a clean XSS miss' in line
 
 
-# -- dalfox exit-1 quiet miss + timeout tone -----------------------------------
+# -- dalfox envelope-first honesty (2026-10-16 ogitech) ------------------------
+# A parseable envelope proves the tool ran: exit code / stderr chatter
+# never override it.  R-only + exit 1 is a clean miss (live /webmail/login
+# case); empty stdout + exit 1 with no envelope is a real failure.
 
-def test_dalfox_exit1_empty_is_executed_clean_miss(monkeypatch):
+_R_ONLY_ENVELOPE = ('{"findings": [{"type": "R", "param": "q", '
+                    '"poc": "alert(1)"}], '
+                    '"meta": {"dalfox_version": "3.2.4"}}')
+
+
+def test_dalfox_exit1_empty_without_envelope_is_failed(monkeypatch):
     async def _run(argv, timeout):
         return {'ok': False, 'stdout': '', 'stderr': '',
+                'returncode': 1, 'duration_s': 5.0}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/dalfox')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_dalfox('https://quiet.example/'))
+    assert out['status'] == 'failed'
+    assert 'exit code 1' in out['reason']
+
+
+def test_dalfox_exit1_r_only_envelope_is_clean_miss(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': _R_ONLY_ENVELOPE, 'stderr': '',
                 'returncode': 1, 'duration_s': 5.0}
 
     monkeypatch.setattr(tb, 'find_binary',
@@ -542,6 +563,20 @@ def test_dalfox_exit1_empty_is_executed_clean_miss(monkeypatch):
     assert out['status'] == 'executed'
     assert out['matched'] == 0
     assert out['reason'] == ''
+
+
+def test_dalfox_exit1_r_only_envelope_with_stderr_warning_stays_clean(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': _R_ONLY_ENVELOPE,
+                'stderr': 'level=warning msg="slow response"',
+                'returncode': 1, 'duration_s': 5.0}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/dalfox')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_dalfox('https://quiet.example/'))
+    assert out['status'] == 'executed'
+    assert out['matched'] == 0
 
 
 def test_dalfox_exit1_with_stderr_stays_failed(monkeypatch):

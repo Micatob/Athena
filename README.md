@@ -614,17 +614,20 @@ python athena.py -t TARGET -m vuln --no-sqlmap --no-dalfox
 ```
 
 - **sqlmap** confirms SQL injection on the top query-string candidate URL
-  (bounded: 1 URL, `--level 1 --risk 1`, 300s cap). Confirmed parameters
-  become CRITICAL findings: <https://github.com/sqlmapproject/sqlmap>
-- **dalfox** confirms XSS over up to 10 candidate URLs (300s cap each);
-  only verified (`V`) results become HIGH findings, reflected/AST/info
-  results are ignored: <https://github.com/hahwul/dalfox>
-- **wafw00f** fingerprints the WAF in front of the target (60s cap). A hit
+  (bounded: 1 URL, `--level 1 --risk 1`, 150s cap, run via
+  `sys.executable + sqlmap.py` so the `.cmd` shim can never break it).
+  Confirmed parameters become CRITICAL findings:
+  <https://github.com/sqlmapproject/sqlmap>
+- **dalfox** confirms XSS over up to 10 candidate URLs (90s cap each, host
+  skip after one timeout + fan-out stop after two); only verified (`V`)
+  results become HIGH findings, reflected/AST/info results are ignored:
+  <https://github.com/hahwul/dalfox>
+- **wafw00f** fingerprints the WAF in front of the target (30s cap). A hit
   is one INFO finding used for payload/rate tuning, never a vulnerability:
   <https://github.com/EnableSecurity/wafw00f>
 - **httpx** (ProjectDiscovery build) probes the target and folds discovered
   technologies/versions into recon so CVE mapping sees servers the crawler
-  missed (120s cap, zero vulnerability findings):
+  missed (60s cap, zero vulnerability findings):
   <https://github.com/projectdiscovery/httpx>
 - Missing binaries print one skip line each; the scan continues unchanged.
   `ffuf` is intentionally not integrated yet.
@@ -832,13 +835,13 @@ The following items are **documented but incomplete** in the current codebase:
 
 5. **Chromium deferred (data budget).** `playwright` installs, but the ~170 MB browser download is intentionally skipped on metered links — every run logs `Headless crawl skipped` until the operator runs `playwright install chromium` with data to spare. Detection, auth, and vuln scanning are unaffected; `run_coverage_stage` picks Chromium up automatically once present.
 
-6. **DONE (v1.0.0): sqlmap installed.** `python scripts/install_tools.py --only sqlmap` fetched the engine; `run_extended_tools` now confirms SQLi (bounded: 1 URL, level 1/risk 1, 300s). Re-run the installer after moving machines.
+6. **DONE (v1.0.0, hardened 2026-10-16): sqlmap installed.** `python scripts/install_tools.py --only sqlmap` fetched the engine; `run_extended_tools` now confirms SQLi (bounded: 1 URL, level 1/risk 1, 150s, direct `sys.executable + sqlmap.py` launch so the `.cmd` shim can never break it). Re-run the installer after moving machines.
 
 7. **Gemini auth-key format (post May-2026).** Google AI Studio now issues auth keys (`AQ.Ab...`) instead of `AIza...` standard keys; unrestricted standard keys are rejected. Athena accepts both formats and lets the API decide (`configured_providers()`), but an unrestricted/orphaned key still fails with an empty `LLM call failed (gemini):` line. Fix: AI Studio → key → **Restrict to Gemini API only** + enable `generativelanguage.googleapis.com`. Until then Groq-only (`providers: ['groq']`) is the correct working state.
 
 8. **Single-LLM rate limits on big scans (optional keys documented).** Groq free tier 429s after ~70 findings (`rate limited 3x; cooling down 60s`), leaving AI triage degraded. Deterministic dedup still runs, but narratives/flagging thin out. Optional, data-free fixes now in `.env.example`: `DEEPSEEK_API_KEY` as second failover, `NVD_API_KEY` (50 req/30s vs 5/30s) to cut keyword-fallback CVE noise.
 
-9. **Dalfox vs WAF tarpitting.** `dalfox run failed ... timed out after 300s` on `/admin.php`, `/config.php.old` — ModSecurity holds the connection open. Bounded per-URL timeout contains it (scan continues), but those URLs get `0 XSS` by timeout, not by proof. Future: adaptive per-host backoff + early WAF-block abort instead of full 300s wait.
+9. **Dalfox vs WAF tarpitting (contained 2026-10-16).** `dalfox ... timed out after 90s` on tarpit hosts (ModSecurity holds the connection open) prints `[*] ... skipped as inconclusive`, skips the host's later URLs, and stops the fan-out after two timeouts so Phase 3 is never stalled. R-only dalfox output (exit 1, e.g. `/webmail/login`) is a clean `0 XSS` miss, never a scary `[!]` line. Timeouts stay inconclusive-by-wait, not proof of absence.
 
 10. **DONE (v1.0.0): Restricted-Technique confirmation UI in CLI.** `--confirm-dangerous` prompts interactive Allow/Deny per tool wave (nuclei, sqlmap/dalfox/wafw00f/httpx, automated exploitation); declined waves are recorded as `skipped` in reports. Default off so agents, API mode, and CI stay non-interactive.
 

@@ -210,12 +210,16 @@ def install_tool(tool, dest_dir, pinned=False):
             if not os.path.isfile(entry):
                 print("    [!] sqlmap tree has no sqlmap.py entry point - install FAILED")
                 continue
+            # Shim calls the installing interpreter by absolute path, never
+            # bare ``python`` (PATH-dependent, breaks asyncio launches and
+            # multi-Python boxes).  Rewritten on every install so stale
+            # bare-python shims are repaired automatically.
             if _is_windows():
                 with open(os.path.join(dest_dir, "sqlmap.cmd"), "w") as fh:
-                    fh.write('@echo off\r\npython "%s" %%*\r\n' % entry)
+                    fh.write('@echo off\r\n"%s" "%s" %%*\r\n' % (sys.executable, entry))
             else:
                 with open(os.path.join(dest_dir, "sqlmap"), "w") as fh:
-                    fh.write('#!/bin/sh\nexec python3 "%s" "$@"\n' % entry)
+                    fh.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, entry))
                 _make_executable(os.path.join(dest_dir, "sqlmap"))
             print("  [+] sqlmap tree at %s" % target)
             ok = True
@@ -257,6 +261,25 @@ def verify(dest_dir):
                 continue
             print("  %-8s %s" % (tool, entry))
             continue
+        if tool == "httpx" and path:
+            # find_binary prefers PATH: on dev boxes that is Python's httpx
+            # CLI (name collision), not ProjectDiscovery httpx.  Probe the
+            # Athena tools dirs the same way tool_bridge does before calling
+            # it found.
+            try:
+                from modules.tool_bridge import _httpx_is_pd as _is_pd
+                from modules.tool_bridge import _find_pd_httpx_candidate as _pd_cand
+                import asyncio as _aio
+                is_pd = _aio.run(_is_pd(path))
+                if not is_pd:
+                    alt = _pd_cand()
+                    if alt:
+                        print("  %-8s %s (PATH hit is Python httpx; PD build at %s)" % (tool, path, alt))
+                        continue
+                    print("  %-8s COLLISION (PATH httpx is Python httpx, PD build missing)" % tool)
+                    continue
+            except Exception:
+                pass
         print("  %-8s %s" % (tool, path or "MISSING"))
         if not path and tool not in ("sqlmap", "httpx"):
             all_ok = False
