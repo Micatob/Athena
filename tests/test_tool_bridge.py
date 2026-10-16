@@ -528,6 +528,54 @@ def test_dalfox_notice_unreachable_is_info_not_alarm():
     assert 'not a clean XSS miss' in line
 
 
+# -- dalfox exit-1 quiet miss + timeout tone -----------------------------------
+
+def test_dalfox_exit1_empty_is_executed_clean_miss(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': '', 'stderr': '',
+                'returncode': 1, 'duration_s': 5.0}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/dalfox')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_dalfox('https://quiet.example/'))
+    assert out['status'] == 'executed'
+    assert out['matched'] == 0
+    assert out['reason'] == ''
+
+
+def test_dalfox_exit1_with_stderr_stays_failed(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': '', 'stderr': 'panic: runtime error',
+                'returncode': 1, 'duration_s': 1.0}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/dalfox')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_dalfox('https://loud.example/'))
+    assert out['status'] == 'failed'
+    assert 'panic' in out['reason']
+    assert out['target'] == 'https://loud.example/'
+
+
+def test_dalfox_timeout_is_failed_with_target_and_info_tone(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': '', 'stderr': '', 'returncode': None,
+                'timeout': True, 'duration_s': 300.0}
+
+    monkeypatch.setattr(tb, 'find_binary',
+                        lambda name, extra_dirs=(): '/opt/dalfox')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_dalfox('https://slow.example/'))
+    assert out['status'] == 'failed'
+    assert out['reason'].startswith('timed out')
+    assert out['target'] == 'https://slow.example/'
+    line = tb.dalfox_notice(out)
+    assert line.startswith('  [*]')
+    assert 'inconclusive' in line
+    assert '[!]' not in line
+
+
 def test_quick_reachable_true_on_200():
     import athena
     from aioresponses import aioresponses

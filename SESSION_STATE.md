@@ -975,3 +975,38 @@ per-finding `[AI-FP]` rows flooding the terminal.
 - Full suite in halves: **588 + 453 = 1041 passed, 1 skipped**.
 - flake8 (CI rule): 0 new violations (athena.py 127 -> 125; E9/F hits in
   touched files confirmed pre-existing via stash).
+
+---
+
+# Athena Session - 2026-10-16 (external-tools noise cleanup, pushed)
+
+## Status: ALL DONE - 1051 passed, 1 skipped
+
+Operator's live scan (ogitech.edu.ng) showed three failures at once:
+
+1. **sqlmap broken install.** `install_tools.py` printed OK but left a 30 KB
+   FILE named `sqlmap` (single-launcher fast path in `_extract_binary` won
+   over the tree extraction) with the shim pointing at a nonexistent
+   `sqlmap/sqlmap.py`. Fixed the extractor order, the move (clears stray
+   file OR dir, verifies the entry point, fails honestly otherwise), and
+   `verify()` (a file named `sqlmap` is now reported BROKEN, not found).
+   Reinstalled for real: sqlmap 1.10.10, `tool_status` reports it honestly.
+2. **Bridge honesty** (`modules/tool_bridge.py`): a launch that never reaches
+   the tool (`can't open file`, `not recognized`, denied) is now
+   `unavailable` + reinstall hint, never `failed`. dalfox exit-1 with empty
+   stderr and no findings is an executed clean miss (stderr text stays
+   `failed`). dalfox timeouts print `[*] ... skipped as inconclusive` and
+   failed summaries carry their target.
+3. **Fan-out discipline** (`athena.py`): a host that burns one full dalfox
+   timeout is skipped for later URLs (recorded, never silent). Console
+   prints one aggregate clean-miss line + max two problem lines + cap note
+   no matter the mix; every per-URL record stays in the report.
+
+### Tests (10 new)
+- Installer (3): tree-not-file extraction, BROKEN stray-file verify,
+  tree-accept verify. Bridge (5): dalfox exit-1 quiet/loud, timeout target
+  + tone, sqlmap broken-launch unavailable, sqlmap timeout stays failed.
+  Fan-out (2): same-host skip burns one probe, 9-probe mix prints <= 4
+  lines while the report keeps all 9.
+- Full suite in halves: **592 + 459 = 1051 passed, 1 skipped**.
+- flake8 (CI rule): 0 new violations (athena.py steady at 125).

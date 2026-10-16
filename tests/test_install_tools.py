@@ -34,3 +34,34 @@ def test_verify_reports_missing_without_network(tmp_path, monkeypatch, capsys):
     ok = inst2.verify(str(tmp_path))
     assert ok is False
     assert 'MISSING' in capsys.readouterr().out
+
+
+def test_extract_sqlmap_takes_tree_not_single_file(tmp_path):
+    """Regression: the single-file scan grabbed only the sqlmap.py launcher,
+    leaving a FILE named `sqlmap` and a shim to nowhere."""
+    import zipfile
+    archive = str(tmp_path / "master.zip")
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("sqlmap-master/sqlmap.py", "# launcher")
+        zf.writestr("sqlmap-master/lib/core.py", "# lib")
+    out = inst._extract_binary(archive, "sqlmap.py", str(tmp_path))
+    assert os.path.isdir(out)
+    assert os.path.isfile(os.path.join(out, "sqlmap-master", "sqlmap.py"))
+
+
+def test_verify_rejects_stray_sqlmap_file(tmp_path, capsys):
+    (tmp_path / "sqlmap").write_text("# stray launcher, not a tree")
+    assert inst.verify(str(tmp_path)) is False
+    assert "BROKEN" in capsys.readouterr().out
+
+
+def test_verify_accepts_sqlmap_tree(tmp_path, monkeypatch, capsys):
+    tree = tmp_path / "sqlmap"
+    tree.mkdir()
+    (tree / "sqlmap.py").write_text("# entry point")
+    import modules.tool_bridge as tb
+    monkeypatch.setattr(tb, "find_binary", lambda name, extra_dirs=(): None)
+    inst.verify(str(tmp_path))
+    out = capsys.readouterr().out
+    assert "BROKEN" not in out
+    assert "sqlmap.py" in out

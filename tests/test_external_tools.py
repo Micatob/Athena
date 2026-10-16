@@ -100,6 +100,34 @@ def test_sqlmap_candidate_urls_prefers_query_strings():
     assert picked == ['https://t/b?x=1', 'https://t/c?y=2']
 
 
+def test_sqlmap_broken_launch_is_unavailable_with_reinstall_hint(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': '',
+                'stderr': ("python.exe: can't open file "
+                           "'C:\\\\tools\\\\sqlmap\\\\sqlmap.py': "
+                           "[Errno 2] No such file or directory"),
+                'returncode': 1, 'duration_s': 0.1}
+
+    monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): '/opt/sqlmap.cmd')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
+    assert out['status'] == 'unavailable'
+    assert out['findings'] == []
+    assert 'install_tools.py --only sqlmap' in out['reason']
+
+
+def test_sqlmap_timeout_stays_failed(monkeypatch):
+    async def _run(argv, timeout):
+        return {'ok': False, 'stdout': '', 'stderr': '', 'returncode': None,
+                'timeout': True, 'duration_s': 300.0}
+
+    monkeypatch.setattr(tb, 'find_binary', lambda name, extra_dirs=(): '/opt/sqlmap')
+    monkeypatch.setattr(tb, '_run_process', _run)
+    out = asyncio_run(tb.run_sqlmap('https://t.example/?id=1'))
+    assert out['status'] == 'failed'
+    assert out['reason'].startswith('timed out')
+
+
 # -- dalfox ------------------------------------------------------------------
 
 def test_dalfox_keeps_verified_only():
@@ -408,3 +436,84 @@ def test_extended_tools_skip_fanout_when_target_unreachable(monkeypatch, capsys)
     assert by_tool.get("sqlmap") == "skipped"
     assert by_tool.get("dalfox") == "skipped"
     assert "fan-out skipped" in capsys.readouterr().out
+
+
+def _clean_dalfox(target):
+    return {'tool': 'dalfox', 'status': 'executed', 'binary': '/opt/dalfox',
+            'reason': '', 'findings': [], 'matched': 0,
+            'duration_s': 1.0, 'argv': [], 'target': target}
+
+
+def test_dalfox_skips_host_after_timeout(monkeypatch, capsys):
+    """One tarpit host burns a single timeout, not one per URL."""
+    import athena
+
+    async def _reachable(url, timeout=10.0):
+        return True
+
+    monkeypatch.setattr(athena, "_quick_reachable", _reachable)
+    calls = []
+
+    async def _fake_dalfox(target, binary=None, timeout=300.0, extra_args=(),
+                           enabled=True):
+        calls.append(target)
+        if "slow.example" in target:
+            return {'tool': 'dalfox', 'status': 'failed', 'binary': '/opt/dalfox',
+                    'reason': 'timed out after 300s', 'findings': [], 'matched': 0,
+                    'duration_s': 300.0, 'argv': [], 'target': target}
+        return _clean_dalfox(target)
+
+    monkeypatch.setattr(tb, "run_dalfox", _fake_dalfox)
+    monkeypatch.setattr(tb, "find_binary", lambda name, extra_dirs=(): None)
+    args = argparse.Namespace(no_sqlmap=False, no_dalfox=False,
+                              no_wafw00f=True, no_httpx=True)
+    urls = ["https://slow.example/a", "https://slow.example/b",
+            "https://ok.example/"]
+    out = asyncio_run(athena.run_extended_tools(
+        "https://slow.example/a", args, urls))
+
+    assert calls == ["https://slow.example/a", "https://ok.example/"]
+    dalfox_rows = [s for s in out if s.get("tool") == "dalfox"]
+    assert len(dalfox_rows) == 3  # timeout + tarpit-skip + clean, all kept
+    assert any("earlier probe" in str(s.get("reason", ""))
+               for s in dalfox_rows)
+
+
+def test_dalfox_console_stays_compact_on_mixed_outcomes(monkeypatch, capsys):
+    """Nine probes print a handful of lines; the report keeps all nine."""
+    import athena
+
+    async def _reachable(url, timeout=10.0):
+        return True
+
+    monkeypatch.setattr(athena, "_quick_reachable", _reachable)
+
+    async def _fake_dalfox(target, binary=None, timeout=300.0, extra_args=(),
+                           enabled=True):
+        if target.endswith("/bad"):
+            return {'tool': 'dalfox', 'status': 'failed', 'binary': '/opt/dalfox',
+                    'reason': 'connection reset by peer', 'findings': [],
+                    'matched': 0, 'duration_s': 2.0, 'argv': [], 'target': target}
+        if "slow" in target:
+            return {'tool': 'dalfox', 'status': 'failed', 'binary': '/opt/dalfox',
+                    'reason': 'timed out after 300s', 'findings': [],
+                    'matched': 0, 'duration_s': 300.0, 'argv': [], 'target': target}
+        return _clean_dalfox(target)
+
+    monkeypatch.setattr(tb, "run_dalfox", _fake_dalfox)
+    monkeypatch.setattr(tb, "find_binary", lambda name, extra_dirs=(): None)
+    args = argparse.Namespace(no_sqlmap=False, no_dalfox=False,
+                              no_wafw00f=True, no_httpx=True)
+    urls = (["https://clean.example/"]
+            + [f"https://clean.example/{i}" for i in range(1, 6)]
+            + ["https://slow-a.example/", "https://slow-b.example/x",
+               "https://odd.example/bad"])
+    out = asyncio_run(athena.run_extended_tools(
+        "https://clean.example/", args, urls))
+
+    dalfox_rows = [s for s in out if s.get("tool") == "dalfox"]
+    assert len(dalfox_rows) == 9
+    lines = [line for line in capsys.readouterr().out.splitlines()
+             if "Dalfox:" in line]
+    assert len(lines) <= 4
+    assert any("across 6 URL(s)" in line for line in lines)

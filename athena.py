@@ -1000,7 +1000,22 @@ async def run_extended_tools(target: str,
         try:
             from modules.tool_bridge import run_dalfox as _rd
             disabled = bool(getattr(args, 'no_dalfox', False))
+            # One tarpit host must not burn the full timeout per URL: after
+            # a host times out once, later URLs on it are skipped without
+            # another 300s wait.  Skips are recorded, never silent.
+            timed_out_hosts: Set[str] = set()
             for url in dalfox_urls:
+                try:
+                    host = (urllib.parse.urlsplit(url).hostname or '').lower()
+                except Exception:
+                    host = ''
+                if host and host in timed_out_hosts:
+                    results.append({**_skip, 'tool': 'dalfox',
+                                    'reason': (f'host {host} timed out on an '
+                                               f'earlier probe - skipped without '
+                                               f'another full wait'),
+                                    'target': url})
+                    continue
                 try:
                     summary = await _rd(url, enabled=not disabled)
                 except Exception as exc:
@@ -1008,6 +1023,10 @@ async def run_extended_tools(target: str,
                     continue
                 if summary:
                     results.append(summary)
+                    if (host
+                            and str(summary.get('status')) == 'failed'
+                            and str(summary.get('reason', '')).startswith('timed out')):
+                        timed_out_hosts.add(host)
                 if any(int(s.get('matched', 0) or 0) > 0 for s in results):
                     break  # one confirmed XSS is enough signal; keep phase bounded
         except Exception as exc:  # pragma: no cover
@@ -1036,35 +1055,107 @@ async def run_extended_tools(target: str,
     ordered: List[Dict[str, Any]] = []
     if sqlmap_summary:
         ordered.append(sqlmap_summary)
-    # Collapse repeated dalfox unavailable/disabled into ONE record for
-    # console + report (was printing 10x identical lines, one per URL).
+    # Collapse only truly identical non-runs for the report (all missing,
+    # all disabled, all gated the same way) - every real probe keeps its
+    # per-URL record; the console summary above stays compact regardless.
     if dalfox_list:
         _statuses = {str(s.get('status', '')) for s in dalfox_list}
-        if _statuses <= {'unavailable', 'disabled', 'skipped'}:
+        _reasons = {str(s.get('reason', '')) for s in dalfox_list}
+        if (_statuses <= {'unavailable', 'disabled', 'skipped'}
+                and len(_reasons) == 1):
             ordered.append(dalfox_list[0])
         elif all(str(s.get('status')) == 'executed'
-                 and int(s.get('matched', 0) or 0) == 0 for s in dalfox_list):
-            # Repeated clean misses / unresponsive hosts: one summary row
-            # with the probe count, not ten identical lines.
+                 and int(s.get('matched', 0) or 0) == 0
+                 and not str(s.get('reason', '') or '') for s in dalfox_list):
+            # Repeated clean misses: one summary row with the probe count,
+            # not ten identical lines.
             _first = dict(dalfox_list[0])
             _first['urls_probed'] = len(dalfox_list)
             ordered.append(_first)
         else:
-            # Keep executed/failed runs (they carry per-URL evidence)
-            ordered.extend([s for s in dalfox_list if str(s.get('status')) not in ('unavailable', 'disabled', 'skipped')]
-                           or dalfox_list[:1])
+            # Mixed outcomes or real probes: keep every record for the
+            # report (evidence fidelity over row-count).
+            ordered.extend(dalfox_list)
     if waf_summary:
         ordered.append(waf_summary)
     if httpx_summary:
         ordered.append(httpx_summary)
+    # Console discipline: dalfox fans out over up to 10 URLs, so its
+    # per-URL lines are aggregated (full per-URL records stay in `ordered`
+    # for the report).  Every other tool prints its own single line.
+    _dalfox_entries = [s for s in ordered if str(s.get('tool', '')) == 'dalfox']
     for summary in ordered:
+        if str(summary.get('tool', '')) == 'dalfox':
+            continue
         try:
             notice = tool_notice(summary)
         except Exception:
             notice = ''
         if notice:
             cprint(notice)
+    _print_dalfox_summary(_dalfox_entries)
     return ordered
+
+
+def _print_dalfox_summary(entries: List[Dict[str, Any]]) -> None:
+    """Compact console for the dalfox fan-out (report keeps every record).
+
+    One line for clean misses, one per confirmed hit (rare - the fan-out
+    stops at the first), at most two for inconclusive/problem probes plus
+    a cap note.  Never raises.
+    """
+    try:
+        from modules.tool_bridge import tool_notice as _notice
+    except Exception:
+        return
+    try:
+        rows = [s for s in (entries or []) if isinstance(s, dict)]
+        if not rows:
+            return
+        if len(rows) == 1:
+            try:
+                line = _notice(rows[0])
+            except Exception:
+                line = ''
+            if line:
+                cprint(line)
+            return
+        hits = [s for s in rows if int(s.get('matched', 0) or 0) > 0]
+        clean = [s for s in rows
+                 if str(s.get('status')) == 'executed'
+                 and int(s.get('matched', 0) or 0) == 0
+                 and not str(s.get('reason', '') or '')]
+        odd = [s for s in rows if s not in hits and s not in clean]
+        for s in hits:
+            try:
+                line = _notice(s)
+            except Exception:
+                line = ''
+            if line:
+                cprint(line)
+        if clean:
+            try:
+                total = sum(float(s.get('duration_s', 0.0) or 0.0) for s in clean)
+            except Exception:
+                total = 0.0
+            cprint(f"  [+] Dalfox: 0 XSS findings across {len(clean)} URL(s) "
+                   f"({total:.0f}s total)")
+        shown = 0
+        for s in odd:
+            if shown >= 2:
+                break
+            try:
+                line = _notice(s)
+            except Exception:
+                line = ''
+            if line:
+                cprint(line)
+                shown += 1
+        if len(odd) > shown:
+            cprint(f"  [*] Dalfox: ... and {len(odd) - shown} more probe(s) "
+                   f"(see report)")
+    except Exception:
+        pass
 
 
 async def run_bruteforce(target: str, discovery_results: Dict[str, Any] = None) -> Dict[str, Any]:

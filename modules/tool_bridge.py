@@ -730,6 +730,18 @@ async def run_sqlmap(url: str,
             reason = (str(result.get('stderr')).strip()
                       or f"exit code {result.get('returncode')}")
             reason = reason.splitlines()[0] if reason else 'unknown error'
+        # A launch that never reached sqlmap (missing tree entry point,
+        # broken shim, denied execution) is a broken install, not a scan
+        # result - report unavailable with the fix, never a scary failure.
+        _launch_markers = ('can\'t open file', 'no such file', 'not recognized',
+                           'permission denied', 'access is denied')
+        if any(m in reason.lower() for m in _launch_markers):
+            return {'tool': tool, 'status': 'unavailable', 'binary': binary,
+                    'reason': (f'sqlmap launch is broken ({reason[:150]}) - '
+                               f're-run: python scripts/install_tools.py --only sqlmap'),
+                    'findings': [], 'matched': 0,
+                    'duration_s': result.get('duration_s', 0.0),
+                    'argv': ['<binary>', *argv[1:]]}
         logger.warning('sqlmap run failed for %s: %s', url, reason)
         return {'tool': tool, 'status': 'failed', 'binary': binary,
                 'reason': reason[:300], 'findings': [], 'matched': 0,
@@ -921,17 +933,23 @@ async def run_dalfox(target: str,
             reason = (str(result.get('stderr')).strip()
                       or f"exit code {result.get('returncode')}")
             reason = reason.splitlines()[0] if reason else 'unknown error'
-        # Exit 1 with no parseable findings and no stderr is "no XSS found",
-        # not a crash - report it as an executed clean miss.
-        if result.get('returncode') == 1 and not reason:
-            reason = ''
+        # Exit 1 with no findings and empty stderr is dalfox's quiet
+        # "nothing found", not a crash - report it as an executed clean
+        # miss so the console stays honest without scary [!] lines.
+        # Anything with stderr text stays failed (real error, keep it loud).
+        if result.get('returncode') == 1 and not str(result.get('stderr')).strip():
+            return {'tool': tool, 'status': 'executed', 'binary': binary,
+                    'reason': '', 'findings': [], 'matched': 0,
+                    'duration_s': result.get('duration_s', 0.0),
+                    'argv': ['<binary>', *argv[1:]],
+                    'returncode': 1, 'target': target}
         if reason:
             logger.warning('dalfox run failed for %s: %s', target, reason)
             return {'tool': tool, 'status': 'failed', 'binary': binary,
                     'reason': reason[:300], 'findings': [], 'matched': 0,
                     'duration_s': result.get('duration_s', 0.0),
                     'argv': ['<binary>', *argv[1:]],
-                    'returncode': result.get('returncode')}
+                    'returncode': result.get('returncode'), 'target': target}
     return {'tool': tool, 'status': 'executed', 'binary': binary, 'reason': '',
             'findings': [], 'matched': 0,
             'duration_s': result.get('duration_s', 0.0),
@@ -961,6 +979,16 @@ def dalfox_notice(summary: Optional[Dict[str, Any]]) -> str:
         return f"  [*] Dalfox unavailable: {summary.get('reason', '')}"
     if status == 'skipped':
         return ''
+    if status == 'failed':
+        reason = str(summary.get('reason', '') or '')
+        target = str(summary.get('target', '') or '')
+        # A timeout is inconclusive-by-wait (tarpit/slow host), not a crash:
+        # [*] tone, never scary [!].
+        if reason.startswith('timed out'):
+            at = f" on {target}" if target else ""
+            return (f"  [*] Dalfox: {reason}{at} - skipped as inconclusive, "
+                    f"not a clean miss")
+        return f"  [!] Dalfox failed: {reason or 'unknown error'}"
     return f"  [!] Dalfox failed: {summary.get('reason', 'unknown error')}"
 
 

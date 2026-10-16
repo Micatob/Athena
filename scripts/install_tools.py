@@ -105,6 +105,14 @@ def _asset_urls(tool, tag):
 def _extract_binary(archive, binary_name, dest_dir):
     if archive.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
+            # sqlmap ships as a source tree (sqlmap-master/...), not a
+            # single binary: extract the whole tree first.  The generic
+            # single-file scan below would otherwise grab only the
+            # sqlmap.py launcher and leave a broken install behind.
+            if binary_name == "sqlmap.py":
+                tmp = tempfile.mkdtemp(prefix="athena-sqlmap-")
+                zf.extractall(tmp)
+                return tmp
             for member in zf.namelist():
                 base = os.path.basename(member.rstrip("/"))
                 if base.lower() == binary_name.lower():
@@ -113,11 +121,6 @@ def _extract_binary(archive, binary_name, dest_dir):
                     with open(out, "wb") as fh:
                         fh.write(data)
                     return out
-            # sqlmap master.zip nests under sqlmap-master/: copy the tree
-            if binary_name == "sqlmap.py":
-                tmp = tempfile.mkdtemp(prefix="athena-sqlmap-")
-                zf.extractall(tmp)
-                return tmp
     elif archive.endswith(".tar.gz"):
         import tarfile
         with tarfile.open(archive, "r:gz") as tf:
@@ -187,15 +190,32 @@ def install_tool(tool, dest_dir, pinned=False):
             cands = glob.glob(os.path.join(got, "sqlmap-master*")) or glob.glob(os.path.join(got, "*sqlmap*"))
             src = cands[0] if cands else got
             target = os.path.join(dest_dir, "sqlmap")
-            if os.path.isdir(target):
-                shutil.rmtree(target, ignore_errors=True)
-            shutil.move(src, target)
+            # A previous broken install may have left a FILE named `sqlmap`
+            # (single launcher grabbed instead of the tree) where the
+            # directory must go - remove either form before moving.
+            try:
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target, ignore_errors=True)
+                elif os.path.lexists(target):
+                    os.remove(target)
+            except Exception as exc:
+                print("    [!] cannot clear stale %s: %s" % (target, exc))
+                continue
+            try:
+                shutil.move(src, target)
+            except Exception as exc:
+                print("    [!] cannot place sqlmap tree: %s" % exc)
+                continue
+            entry = os.path.join(target, "sqlmap.py")
+            if not os.path.isfile(entry):
+                print("    [!] sqlmap tree has no sqlmap.py entry point - install FAILED")
+                continue
             if _is_windows():
                 with open(os.path.join(dest_dir, "sqlmap.cmd"), "w") as fh:
-                    fh.write('@echo off\r\npython "%s" %%*\r\n' % os.path.join(target, "sqlmap.py"))
+                    fh.write('@echo off\r\npython "%s" %%*\r\n' % entry)
             else:
                 with open(os.path.join(dest_dir, "sqlmap"), "w") as fh:
-                    fh.write('#!/bin/sh\nexec python3 "%s" "$@"\n' % os.path.join(target, "sqlmap.py"))
+                    fh.write('#!/bin/sh\nexec python3 "%s" "$@"\n' % entry)
                 _make_executable(os.path.join(dest_dir, "sqlmap"))
             print("  [+] sqlmap tree at %s" % target)
             ok = True
@@ -227,6 +247,16 @@ def verify(dest_dir):
                 if os.path.isfile(cand):
                     path = cand
                     break
+        if tool == "sqlmap":
+            # A file named `sqlmap` is NOT an install - the tree entry
+            # point must exist (a past bug left exactly such a stray file).
+            entry = os.path.join(dest_dir, "sqlmap", "sqlmap.py")
+            if not os.path.isfile(entry):
+                print("  %-8s BROKEN (no sqlmap/sqlmap.py - re-run install)" % tool)
+                all_ok = False
+                continue
+            print("  %-8s %s" % (tool, entry))
+            continue
         print("  %-8s %s" % (tool, path or "MISSING"))
         if not path and tool not in ("sqlmap", "httpx"):
             all_ok = False
