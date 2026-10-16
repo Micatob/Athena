@@ -1013,7 +1013,7 @@ Operator's live scan (ogitech.edu.ng) showed three failures at once:
 
 ---
 
-# Athena Session - 2026-10-16 (external-tools root-cause wave, UNCOMMITTED)
+# Athena Session - 2026-10-16 (external-tools root-cause wave, PUSHED `415769f`)
 
 ## Why the ogitech scan still looked broken
 - Operator's ogitech scan (06:26-06:32) ran BEFORE `6266058` landed
@@ -1085,3 +1085,8 @@ Operator's live scan (ogitech.edu.ng) showed three failures at once:
   inconclusive` with the fan-out stopping after two.
 - If the site still blocks (two full scans + fan-outs tripped it before),
   wait for the block to lift / delist in CSF before rescanning.
+
+## Session close-out
+- Pushed `415769f` (8 files, +509/-90) to `Micatob/Athena` master;
+  working tree clean. Operator will pull + rescan once the PC cools down.
+- Open: live full-scan proof on ogitech (pending operator rescan).
