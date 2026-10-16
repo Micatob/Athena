@@ -2346,24 +2346,19 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
           f"(from {len(findings_payload)} raw detections) for false positives...")
     validated = await engine.validate_findings(consolidated)
     if validated:
-        fp_printed = 0
+        # Terminal stays clean: FP hypotheses are recorded for the report
+        # only.  The operator asked never to see per-finding FP rows here -
+        # one count line replaces up to N "[AI-FP]" lines.
+        fp_count = 0
         for stmt in validated.statements:
             if stmt.metadata.get("verdict") != "likely_false_positive":
                 continue
             position = stmt.metadata.get("finding_index")
             _record_false_positive(position, stmt, "validation")
-            raw_indices = _expand(position)
-            _raw = (_clean_vulns[raw_indices[0]]
-                    if raw_indices and raw_indices[0] < len(_clean_vulns) else {})
-            sample = _raw if isinstance(_raw, dict) else {}
-            if fp_printed < 10:
-                cprint(f"      [AI-FP] Potential false positive: "
-                      f"{sample.get('type')} at {sample.get('url')}")
-                fp_printed += 1
-        hidden_fp = len(validated.statements) - fp_printed
-        if hidden_fp > 0:
-            cprint(f"      [AI-FP] ... and {hidden_fp} more hypothesis/FP "
-                  "statement(s) (full list in the report)")
+            fp_count += 1
+        if fp_count:
+            cprint(f"  [*] AI validation flagged {fp_count} finding(s) as likely "
+                   f"false positives - hidden from terminal, full list in the report")
         ai_analysis["validated_findings"] = [
             s.to_dict() for s in validated.statements
         ]
@@ -2400,13 +2395,11 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
 
     # Compact console output: capped, one line per statement, so a noisy scan
     # cannot flood the terminal with hundreds of correlation lines.  The full
-    # list always lands in the report.
-    fp_statements = [s for s in triage
-                     if s.metadata.get("verdict") == "likely_false_positive"]
+    # list always lands in the report.  FP hypotheses never print here at
+    # all (operator rule: no FP rows in the terminal, from any source).
     queue: List[Tuple[str, Any]] = (
         [("[AI]", s) for s in corr.statements]
         + [("[AI]", s) for s in steps]
-        + [("[AI-FP?]", s) for s in fp_statements]
     )
     max_lines = 15
     for label, stmt in queue[:max_lines]:

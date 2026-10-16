@@ -639,9 +639,12 @@ class TestDeterministicDedup:
 def clean_rate_limit_state():
     """Module-level rate-limit state must not leak between tests."""
     from modules.ai_integration import reset_rate_limit_state
+    from modules.ai_integration import reset_ai_offline_state
     reset_rate_limit_state()
+    reset_ai_offline_state()
     yield
     reset_rate_limit_state()
+    reset_ai_offline_state()
 
 
 class _FlakyClient:
@@ -813,3 +816,118 @@ class TestDedupAggregation:
         assert not [s for s in result.statements
                     if s.source_module == "ai_dedup"]
         assert len(result.output_findings) == 2
+
+
+class TestConnectivityFastPath:
+    """A dead local network (DNS) must warn once and skip, never scroll."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_counters(self):
+        from modules import ai_integration as ai_mod
+        old = ai_mod._CALL_FAILURES
+        ai_mod._CALL_FAILURES = 0
+        yield
+        ai_mod._CALL_FAILURES = old
+
+    def _providers(self, monkeypatch, *providers):
+        monkeypatch.setattr(
+            'modules.ai_integration.configured_providers',
+            lambda: list(providers))
+
+    @pytest.mark.asyncio
+    async def test_dns_failure_warns_once_cools_all_no_retry(
+            self, monkeypatch, caplog):
+        import logging
+        from modules import ai_integration as ai_mod
+        self._providers(monkeypatch, AIProvider.GROQ, AIProvider.GEMINI)
+
+        calls = []
+
+        async def boom(*args, **kwargs):
+            calls.append(1)
+            raise OSError(11001, 'getaddrinfo failed')
+
+        first = AIIntegration(provider=AIProvider.GROQ, api_key='groq-key')
+        second = AIIntegration(provider=AIProvider.GEMINI, api_key='gem-key')
+        monkeypatch.setattr(first, '_post_once', boom)
+        monkeypatch.setattr(second, '_post_once', boom)
+
+        with caplog.at_level(logging.WARNING, logger='athena.ai'):
+            assert await first._call_llm('one') is None
+            assert await second._call_llm('two') is None
+
+        # One transport attempt total: no retry, no failover burn, the
+        # second engine rides the offline window silently.
+        assert calls == [1]
+        offline = [r for r in caplog.records
+                   if r.levelno >= logging.WARNING and 'AI offline' in r.message]
+        assert len(offline) == 1
+        assert ai_mod.ai_offline() is True
+        assert ai_mod.provider_cooldown_remaining(AIProvider.GROQ) > 0
+        assert ai_mod.provider_cooldown_remaining(AIProvider.GEMINI) > 0
+
+    @pytest.mark.asyncio
+    async def test_socket_gaierror_counts_as_connectivity(self, monkeypatch):
+        import socket
+        from modules import ai_integration as ai_mod
+        self._providers(monkeypatch, AIProvider.GROQ)
+
+        async def boom(*args, **kwargs):
+            raise socket.gaierror(11001, 'getaddrinfo failed')
+
+        engine = AIIntegration(provider=AIProvider.GROQ, api_key='k')
+        monkeypatch.setattr(engine, '_post_once', boom)
+        assert await engine._call_llm('q') is None
+        assert ai_mod.ai_offline() is True
+
+    @pytest.mark.asyncio
+    async def test_http_error_does_not_arm_offline(self, monkeypatch):
+        from modules import ai_integration as ai_mod
+        self._providers(monkeypatch, AIProvider.GROQ)
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError('400 Bad Request')
+
+        engine = AIIntegration(provider=AIProvider.GROQ, api_key='k')
+        monkeypatch.setattr(engine, '_post_once', boom)
+        assert await engine._call_llm('q') is None
+        assert ai_mod.ai_offline() is False
+
+    @pytest.mark.asyncio
+    async def test_offline_window_skips_transport(self, monkeypatch):
+        self._providers(monkeypatch, AIProvider.GROQ)
+        calls = []
+
+        async def boom(*args, **kwargs):
+            calls.append(1)
+            raise OSError(11001, 'getaddrinfo failed')
+
+        engine = AIIntegration(provider=AIProvider.GROQ, api_key='k')
+        monkeypatch.setattr(engine, '_post_once', boom)
+        assert await engine._call_llm('first') is None
+        before = len(calls)
+        assert before == 1
+        assert await engine._call_llm('second') is None
+        assert len(calls) == before
+
+    @pytest.mark.asyncio
+    async def test_warnings_collapse_process_wide(self, monkeypatch, caplog):
+        import logging
+        self._providers(monkeypatch, AIProvider.GROQ)
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError('connection reset by peer')
+
+        engines = [AIIntegration(provider=AIProvider.GROQ, api_key='k')
+                   for _ in range(4)]
+        for engine in engines:
+            monkeypatch.setattr(engine, '_post_once', boom)
+
+        with caplog.at_level(logging.WARNING, logger='athena.ai'):
+            for engine in engines:
+                assert await engine._call_llm('q') is None
+
+        warns = [r for r in caplog.records
+                 if r.levelno >= logging.WARNING
+                 and 'LLM call failed' in r.message]
+        assert len(warns) == 2

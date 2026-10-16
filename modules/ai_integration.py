@@ -306,6 +306,83 @@ def provider_cooldown_remaining(provider: AIProvider) -> float:
                - time.monotonic())
 
 
+# ---------------------------------------------------------------------------
+# Offline fast-path (dead local network, e.g. no DNS)
+# ---------------------------------------------------------------------------
+#
+# ``[Errno 11001] getaddrinfo failed`` means the machine itself cannot
+# resolve names - every provider fails identically, so failover and retries
+# only burn scan time and scroll warnings.  The first connectivity failure
+# opens a process-wide offline window (all providers cooled, one warning);
+# every later call skips silently until the window lapses, then the network
+# gets one honest retry instead of a permanent blackout.
+
+#: Window during which provider calls are skipped after a dead-network
+#: signal (seconds).  Re-armed by every fresh connectivity failure.
+OFFLINE_COOLDOWN_SECONDS = 300.0
+
+#: Lowercased markers identifying a dead local network (never a provider
+#: verdict).  Only consulted when the error carries no HTTP status -
+#: a provider that answered (even with 4xx/5xx) is not "offline".
+_CONNECTIVITY_MARKERS = (
+    'getaddrinfo', 'gaierror', 'nameresolution', 'name resolution',
+    'nodename nor servname', 'temporary failure in name resolution',
+    'network is unreachable', 'no address associated with hostname',
+    'network is down', 'connecterror',
+)
+
+_AI_OFFLINE_UNTIL = 0.0
+_OFFLINE_WARNED = False
+
+
+def ai_offline() -> bool:
+    """True while the offline window from a dead network is active."""
+    return time.monotonic() < _AI_OFFLINE_UNTIL
+
+
+def reset_ai_offline_state() -> None:
+    """Clear the offline window and its warned flag (used by tests)."""
+    global _AI_OFFLINE_UNTIL, _OFFLINE_WARNED
+    _AI_OFFLINE_UNTIL = 0.0
+    _OFFLINE_WARNED = False
+
+
+def _is_connectivity_error(exc: BaseException) -> bool:
+    """True when the failure is the local network, not the provider."""
+    if _status_code(exc) is not None:
+        return False
+    try:
+        import socket as _socket
+        if isinstance(exc, _socket.gaierror):
+            return True
+    except Exception:
+        pass
+    try:
+        text = str(exc).lower()
+    except Exception:
+        return False
+    return any(m in text for m in _CONNECTIVITY_MARKERS)
+
+
+def _note_connectivity_failure(logger: logging.Logger) -> None:
+    """Shared response to a dead network: cool everything, warn once."""
+    global _AI_OFFLINE_UNTIL, _OFFLINE_WARNED
+    _AI_OFFLINE_UNTIL = time.monotonic() + OFFLINE_COOLDOWN_SECONDS
+    try:
+        for provider in configured_providers():
+            _PROVIDER_COOLDOWN_UNTIL[provider] = _AI_OFFLINE_UNTIL
+            _PROVIDER_STRIKES[provider] = 0
+    except Exception:
+        pass
+    if not _OFFLINE_WARNED:
+        _OFFLINE_WARNED = True
+        logger.warning(
+            "AI offline (DNS/network unreachable) - continuing without AI "
+            "analysis; deterministic results unaffected")
+    else:
+        logger.debug("AI still offline - provider call skipped")
+
+
 def _status_code(exc: BaseException) -> Optional[int]:
     """Extract an HTTP status code from an exception, if it has one."""
     response = getattr(exc, "response", None)
@@ -597,6 +674,10 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         """
         if not self._enabled:
             return None
+        if ai_offline():
+            self.logger.debug(
+                "AI offline window active - skipping provider call")
+            return None
         text = await self._call_llm_provider(
             self.provider, prompt, temperature)
         if text is not None:
@@ -622,14 +703,15 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         return resolve_model(provider)
 
     async def _call_llm_provider(self, provider: AIProvider,
-                                 prompt: str,
-                                 temperature: float = 0.3) -> Optional[str]:
+                                  prompt: str,
+                                  temperature: float = 0.3) -> Optional[str]:
         """Call one specific provider; returns None on failure.
 
         Retryable failures (429 / 5xx) are retried up to
         ``MAX_RATE_LIMIT_RETRIES`` times with backoff; every other error
         returns immediately so the caller can fail over to the next
-        provider without waiting.
+        provider without waiting.  A dead local network (DNS) short-circuits
+        everything: one shared warning, all providers cooled, no retries.
         """
         global _CALL_FAILURES
         config = AI_PROVIDERS[provider]
@@ -640,10 +722,16 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
 
         cooldown = provider_cooldown_remaining(provider)
         if cooldown > 0:
-            self.logger.info(
-                f"Skipping AI provider {provider.value}: rate-limit "
-                f"cool-down ({cooldown:.0f}s remaining)"
-            )
+            if ai_offline():
+                self.logger.debug(
+                    f"Skipping AI provider {provider.value}: offline window "
+                    f"({cooldown:.0f}s remaining)"
+                )
+            else:
+                self.logger.info(
+                    f"Skipping AI provider {provider.value}: rate-limit "
+                    f"cool-down ({cooldown:.0f}s remaining)"
+                )
             return None
 
         for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
@@ -653,21 +741,24 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 _PROVIDER_STRIKES[provider] = 0
                 return content
             except Exception as e:
+                if _is_connectivity_error(e):
+                    _note_connectivity_failure(self.logger)
+                    self.call_failures += 1
+                    _CALL_FAILURES += 1
+                    return None
                 status = _status_code(e)
                 if status == 429:
                     _register_rate_limit(provider, self.logger)
                 retryable = status in RETRYABLE_STATUS
                 if not retryable or attempt >= MAX_RATE_LIMIT_RETRIES:
-                    # Collapse log spam: first 2 failures warn, rest debug
-                    # (prod run printed 6x identical gemini lines).
-                    try:
-                        _n = int(getattr(self, 'call_failures', 0))
-                    except Exception:
-                        _n = 0
-                    if _n < 2:
+                    # Collapse log spam process-wide: the first 2 failures
+                    # warn, the rest debug.  Per-instance counting missed
+                    # this (ensemble builds one engine per provider, so a
+                    # dead network printed 2 warnings per engine).
+                    if _CALL_FAILURES < 2:
                         self.logger.warning(f"LLM call failed ({provider.value}): {e}")
                     else:
-                        self.logger.debug(f"LLM call failed ({provider.value}) #{_n+1}: {e}")
+                        self.logger.debug(f"LLM call failed ({provider.value}) #{_CALL_FAILURES+1}: {e}")
                     self.call_failures += 1
                     _CALL_FAILURES += 1
                     return None

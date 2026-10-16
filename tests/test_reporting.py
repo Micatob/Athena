@@ -352,6 +352,35 @@ class TestSarifExport:
         assert run["results"][0]["locations"][0]["physicalLocation"][
             "artifactLocation"]["uri"] == "https://t/1"
 
+    def test_false_positive_marked_findings_excluded(self):
+        from modules.reporting import build_sarif, is_false_positive_finding
+        assert is_false_positive_finding(
+            {'type': 'XSS', 'false_positive': True}) is True
+        assert is_false_positive_finding(
+            {'type': 'XSS', 'state': 'false_positive'}) is True
+        assert is_false_positive_finding(
+            {'type': 'XSS', 'state': 'False_Positive'}) is True
+        assert is_false_positive_finding(
+            {'type': 'XSS', 'severity': 'HIGH'}) is False
+        assert is_false_positive_finding(
+            {'type': 'XSS', 'verification': {'status': 'inconclusive'}}) is False
+        assert is_false_positive_finding(None) is False
+        assert is_false_positive_finding('xss') is False
+
+        log = build_sarif("t", [
+            {"type": "XSS", "severity": "HIGH", "url": "https://t/1"},
+            {"type": "XSS", "severity": "HIGH", "url": "https://t/2",
+             "false_positive": True},
+            {"type": "SQL Injection", "severity": "CRITICAL",
+             "url": "https://t/3", "state": "false_positive"},
+            # Inconclusive is NOT a false positive - it stays.
+            {"type": "XSS", "severity": "HIGH", "url": "https://t/4",
+             "verification": {"status": "inconclusive"}},
+        ])
+        uris = [r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+                for r in log["runs"][0]["results"]]
+        assert uris == ["https://t/1", "https://t/4"]
+
     def test_sarif_drops_non_dicts_and_missing_url(self):
         log = self._sarif([None, "xss", {"type": "XSS", "severity": "HIGH"}])
         results = log["runs"][0]["results"]

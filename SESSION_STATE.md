@@ -934,3 +934,44 @@ criteria). Do NOT start B or C until the operator says so.
 - Smoke: `--version` -> `athena 1.0.0`; `--help` shows sarif + confirm-dangerous;
   live SARIF generation verified (rules/levels correct).
 - Tag: `v1.0.0` on this commit.
+
+---
+
+# Athena Session - 2026-10-16 (AI-offline + FP-silence fixes, pushed)
+
+## Status: ALL 3 DONE - 1041 passed, 1 skipped
+
+Operator ran two scans mid-session on a box with dead DNS and hit a wall of
+`LLM call failed (groq|gemini): [Errno 11001] getaddrinfo failed`, plus
+per-finding `[AI-FP]` rows flooding the terminal.
+
+1. **AI offline fast-path** (`modules/ai_integration.py`): a failure with no
+   HTTP status matching DNS/unreachable markers (or `socket.gaierror`) now
+   cools ALL providers for 300s, warns ONCE process-wide
+   (`AI offline ... continuing without AI analysis`), and returns with no
+   retry/failover burn. Later calls skip silently until the window lapses.
+   Failure-log collapse also switched from per-instance to process-wide
+   `_CALL_FAILURES` (ensemble builds one engine per provider, so per-engine
+   counting re-printed warnings). `ConnectError("connection refused")` still
+   fails over (provider-side, not DNS) - existing test demanded it, so the
+   matcher reads the message only, never the exception type name.
+   New: `ai_offline()`, `reset_ai_offline_state()`, `_is_connectivity_error()`.
+2. **Terminal FP silence** (`athena.py::run_ai_analysis`): per-finding
+   `[AI-FP]` rows (up to 10) and `[AI-FP?]` queue entries no longer print -
+   one count line replaces them. `filtered_indices`/`filtered_findings` and
+   the JSON/HTML FP sections are untouched (audit trail intact).
+3. **SARIF FP filter** (`modules/reporting.py`): `build_sarif()` excludes
+   findings with explicit markers via `is_false_positive_finding()`
+   (`false_positive is True` or `state == 'false_positive'`); AI hypotheses
+   and `inconclusive` verifications are NOT fp and always stay.
+
+### Tests (13 new)
+- `TestConnectivityFastPath` (5): warn-once + cool-all + no-retry across two
+  engines, gaierror, HTTP-error-does-not-arm, latch-skips-transport,
+  process-wide 2-warning collapse.
+- `TestTerminalHidesFalsePositives` (1): terminal has zero FP rows/URLs but
+  the count line prints and the report keeps both findings.
+- SARIF FP test (1): both markers excluded, `inconclusive` kept.
+- Full suite in halves: **588 + 453 = 1041 passed, 1 skipped**.
+- flake8 (CI rule): 0 new violations (athena.py 127 -> 125; E9/F hits in
+  touched files confirmed pre-existing via stash).

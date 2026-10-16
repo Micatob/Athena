@@ -125,6 +125,78 @@ class TestConsoleTruthfulness:
         assert analysis['provider_call_failures'] == 1
 
 
+class TestTerminalHidesFalsePositives:
+    """Operator rule: no FP rows in the terminal, from any source."""
+
+    @pytest.mark.asyncio
+    async def test_fp_findings_hidden_from_terminal_kept_in_report(
+            self, monkeypatch, capsys):
+        from modules import ai_integration as ai_mod
+
+        class _Stmt:
+            def __init__(self, content, metadata):
+                self.content = content
+                self.metadata = metadata
+                self.confidence = 0.9
+
+            def to_dict(self):
+                return {'content': self.content, 'metadata': self.metadata,
+                        'confidence': self.confidence}
+
+        class _Bundle:
+            def __init__(self, statements):
+                self.statements = statements
+                self.reasoning = 'validation pass'
+                self.confidence = 0.9
+
+        class _FakeEngine:
+            enabled = True
+            provider = AIProvider.GROQ
+            model = 'fake-model'
+
+            async def validate_findings(self, findings):
+                return _Bundle([
+                    _Stmt('Finding #0 is likely a false positive. not reflected',
+                          {'verdict': 'likely_false_positive',
+                           'finding_index': 0,
+                           'reasoning': 'not reflected'}),
+                    _Stmt('Finding #1 is likely a false positive. static page',
+                          {'verdict': 'likely_false_positive',
+                           'finding_index': 1,
+                           'reasoning': 'static page'}),
+                ])
+
+            async def correlate_findings(self, payload, extra):
+                return _Bundle([_Stmt('advisory correlation', {})])
+
+            async def analyze_recon(self, discovery):
+                return [_Stmt('advisory recon', {})]
+
+            async def suggest_next_steps(self, payload, context):
+                return [_Stmt('advisory next step', {})]
+
+        monkeypatch.setattr(ai_mod, 'AIIntegration', _FakeEngine)
+
+        vulns = [
+            {'type': 'XSS', 'url': 'https://fp.test/1',
+             'severity': 'HIGH', 'description': 'reflected?'},
+            {'type': 'XSS', 'url': 'https://fp.test/2',
+             'severity': 'HIGH', 'description': 'reflected?'},
+        ]
+        analysis = await athena.run_ai_analysis('http://fp.test', {}, vulns)
+        out = capsys.readouterr().out
+
+        assert '[AI-FP' not in out
+        assert 'Potential false positive' not in out
+        assert 'https://fp.test/1' not in out
+        assert 'https://fp.test/2' not in out
+        assert 'flagged 2 finding(s)' in out
+        # The report keeps everything the terminal hides.
+        assert len(analysis['filtered_indices']) == 2
+        assert len(analysis['filtered_findings']) == 2
+        assert analysis['filtered_findings'][0]['url'] == 'https://fp.test/1'
+
+
 class TestProviderFailureCounter:
     @pytest.mark.asyncio
     async def test_failed_call_is_counted(self, monkeypatch):

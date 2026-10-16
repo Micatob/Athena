@@ -399,18 +399,36 @@ def _sarif_rule_id(vuln_type: str) -> str:
     return f"athena/{slug or 'finding'}"
 
 
+def is_false_positive_finding(v: Any) -> bool:
+    """True when a finding carries an explicit false-positive marker.
+
+    Only explicit markers count: ``false_positive is True`` (operator or
+    lifecycle triage) or ``state == 'false_positive'`` (FindingState value).
+    AI hypotheses, ``inconclusive`` verifications, and unreviewed findings
+    are NOT false positives and are always kept.
+    """
+    if not isinstance(v, dict):
+        return False
+    if v.get('false_positive') is True:
+        return True
+    return str(v.get('state') or '').lower() == 'false_positive'
+
+
 def build_sarif(target: Any, vulnerabilities: Any) -> Dict[str, Any]:
     """Build a SARIF 2.1.0 log from Athena findings (pure, never raises).
 
     Shared by live ``export_to_sarif`` and history re-exports so the
     VS Code extension and GitHub code scanning see identical rule ids.
-    Non-dict findings are dropped; missing fields degrade gracefully.
+    Non-dict findings are dropped; explicitly FP-marked findings are
+    excluded (the operator rule: no FP rows in machine outputs either).
+    Missing fields degrade gracefully.
     """
     try:
         from modules import ATHENA_VERSION as _ver
     except Exception:
         _ver = "1.0.0"
-    vulns = [v for v in (vulnerabilities or []) if isinstance(v, dict)]
+    vulns = [v for v in (vulnerabilities or [])
+             if isinstance(v, dict) and not is_false_positive_finding(v)]
     rules: Dict[str, Dict[str, Any]] = {}
     results: List[Dict[str, Any]] = []
     for v in vulns:
