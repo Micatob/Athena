@@ -87,6 +87,48 @@ HIDDEN_PATHS = [
 BACKUP_EXTENSIONS = [".bak", ".backup", ".old", ".original", ".sql", ".dump", ".zip", ".tar.gz", ".7z", ".rar"]
 
 
+def load_path_wordlist() -> List[str]:
+    """Paths from the shipped wordlist file (``common_files.txt``), else [].
+
+    Resolves ``FrameworkConfig.DEFAULT_WORDLIST`` (env ``DEFAULT_WORDLIST``)
+    against the repo root.  Blank lines and ``#`` comments are skipped.
+    Never raises - a missing/unreadable file means [], and callers fall
+    back to the built-in ``HIDDEN_PATHS``.
+    """
+    try:
+        from modules.framework_config import FrameworkConfig as _FC
+        name = str(getattr(_FC, 'DEFAULT_WORDLIST', '') or 'common_files.txt')
+    except Exception:
+        name = 'common_files.txt'
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [name] if os.path.isabs(name) else [
+        os.path.join(root, os.path.basename(name)), name]
+    for path in candidates:
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+                paths: List[str] = []
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if not line.startswith('/'):
+                        line = '/' + line
+                    if line not in paths:
+                        paths.append(line)
+            if paths:
+                return paths
+        except OSError:
+            continue
+    return []
+
+
+def active_paths() -> List[str]:
+    """Wordlist paths when shipped, else the built-in ``HIDDEN_PATHS``."""
+    return load_path_wordlist() or list(HIDDEN_PATHS)
+
+
 class HiddenAssetScanner:
     def __init__(self, max_concurrency: Optional[int] = None, budget_seconds: Optional[float] = None):
         self.max_concurrency = int(
@@ -192,7 +234,7 @@ class HiddenAssetScanner:
     async def scan_hidden_paths(self, target: str) -> None:
         session = await self._get_session()
         candidates = []
-        for path in HIDDEN_PATHS:
+        for path in active_paths():
             url = urljoin(target, path)
             if url in self.visited_urls:
                 continue
@@ -226,7 +268,7 @@ class HiddenAssetScanner:
     async def scan_backup_files(self, target: str) -> None:
         session = await self._get_session()
         candidates = []
-        for path in HIDDEN_PATHS:
+        for path in active_paths():
             for ext in BACKUP_EXTENSIONS:
                 backup_path = f"{path}{ext}" if not path.endswith(ext) else path
                 url = urljoin(target, backup_path)

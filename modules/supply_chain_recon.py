@@ -1,5 +1,5 @@
 """
-Athena Omega - Supply-chain recon (RedAmon L2 concept, offline)
+Athena Omega - Supply-chain recon (Athena native, offline)
 Harvests npm package set from JS text (no new fetches), builds SBOM,
 verdicts against local OSV cache if present. Passive + offline. Never raises.
 """

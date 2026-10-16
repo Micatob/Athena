@@ -1,5 +1,5 @@
 """
-Athena Omega - TLS scan (RedAmon tlsx concept, pure Python)
+Athena Omega - TLS scan (Athena native, pure Python)
 Captures issuer/SAN/validity without extra deps. Never raises.
 """
 import socket

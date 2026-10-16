@@ -893,3 +893,44 @@ criteria). Do NOT start B or C until the operator says so.
 1. `playwright install chromium` + `--only sqlmap` on operator box.
 2. Optional `DEEPSEEK_API_KEY` / `NVD_API_KEY` to end Groq-429 degradation.
 3. Phase 2 Agent-lite (ReAct + Fireteam) when operator calls it.
+
+---
+
+# Athena v1.0.0 - 2026-10-16 (quick wins + VS Code agent contract, tagged)
+
+## Status: ALL 5 DONE + 1 inherited regression fixed - 1034 passed, 1 skipped
+
+1. **Wordlist shipped.** NEW `common_files.txt` (~95 paths); `hidden_asset_scanner`
+   loads it via `load_path_wordlist()`/`active_paths()` honouring
+   `DEFAULT_WORDLIST`, falling back to built-in `HIDDEN_PATHS`. 4 new tests.
+2. **Env.** `install_tools.py --only sqlmap` OK (SQLi confirmation live).
+   Chromium SKIPPED per operator rule (browser ~170 MB > 50 MB cap; headless-shell
+   download also failed) - documented in README gap 5 + `docs/VSCODE_AGENT.md` §6.
+   `NVD_API_KEY` added to `.env.example`; `DEEPSEEK_API_KEY` was already there.
+3. **SARIF.** `reporting.build_sarif()` (SARIF 2.1.0, stable `athena/<slug>` rule
+   ids, error/warning/note levels, verification properties) + `export_to_sarif`;
+   wired to `-o sarif|all`, `--export-history --output sarif`, `export_scan()`,
+   and `GET /scans/<id>/export?format=sarif`. 7 new tests + live smoke verified.
+4. **`--confirm-dangerous`.** Allow/Deny per wave (nuclei, extended tools,
+   auto-exploitation); declined waves recorded as `skipped`. Default off
+   (agents/API/CI unaffected); non-TTY degrades to allow-with-notice. 9 new tests.
+5. **Agent contract.** NEW `docs/VSCODE_AGENT.md` (CLI/API/schemas/SARIF/history);
+   `modules.ATHENA_VERSION = "1.0.0"` + `--version` handshake flag.
+6. **Hygiene.** Deleted fork-findings file (Athena-only tree), `fullscan.txt` +
+   `report_*.sarif/csv/pdf` gitignored, user-facing fork names reworded to
+   Athena-native (runtime strings, README, module headers; session history kept),
+   README gaps 1/5/6/8/10 closed or documented, flags table + formats updated.
+
+### Inherited regression fixed (not from this wave)
+- `tool_status()` absent-binary path broken since `8ab7495` (early `return`
+  removed by the httpx-collision edit) - `test_tool_status_reports_absent_tool`
+  failed. Restored `if not binary: return status`. Omega-era full suite was
+  never re-run at that push; it is green now.
+
+### Verification
+- Full suite: **1034 passed, 1 skipped** (pre-existing skip), 216s.
+- flake8 (CI rule): 0 new violations (athena.py count identical 127 before/after;
+  E9/F hits in touched files all pre-existing, confirmed via stash).
+- Smoke: `--version` -> `athena 1.0.0`; `--help` shows sarif + confirm-dangerous;
+  live SARIF generation verified (rules/levels correct).
+- Tag: `v1.0.0` on this commit.

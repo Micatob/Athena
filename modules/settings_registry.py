@@ -1,5 +1,5 @@
 """
-Athena Omega - Settings Registry (RedAmon 500+ settings concept, Athena scale)
+Athena Omega - Settings Registry (Athena native tunables)
 ============================================================================
 Single description of every tunable: key, type, default, bounds, stealth cap.
 Derived lists (rate caps, timeouts) are queries over it, never hand-aligned.

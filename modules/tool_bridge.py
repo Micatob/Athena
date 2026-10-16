@@ -550,6 +550,8 @@ async def tool_status(tool: str = 'nuclei') -> Dict[str, Any]:
     }
     try:
         binary = find_binary(tool)
+        if not binary:
+            return status
         if tool == 'httpx' and binary and not await _httpx_is_pd(binary):
             # PATH hit is Python's httpx CLI (name collision). Scan the
             # Athena tools dirs for the real ProjectDiscovery build before

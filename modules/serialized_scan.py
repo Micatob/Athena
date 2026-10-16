@@ -1,5 +1,5 @@
 """
-Athena Omega - Serialized-object passive detection (RedAmon concept)
+Athena Omega - Serialized-object passive detection (Athena native)
 Detects insecure-deserialization sinks WITHOUT deserializing.
 Bomb-safe: base64-decode capped, recursion capped, never eval/pickle.loads.
 Writes info + needs_agent_confirmation candidates. Never raises.

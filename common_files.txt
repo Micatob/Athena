@@ -1,0 +1,119 @@
+# Athena content-discovery wordlist (common_files.txt)
+# One path per line. Lines starting with '#' and blank lines are ignored.
+# Referenced by FrameworkConfig.DEFAULT_WORDLIST (env: DEFAULT_WORDLIST).
+# The hidden-asset scanner loads this file when present and falls back to
+# its built-in list otherwise, so edits here take effect with no code change.
+#
+# Categories: version control, environment/config, backups & dumps, archives,
+# diagnostics & debug, logs, API/docs, admin panels, CMS, well-known.
+
+# --- version control & metadata ---
+/.git
+/.git/
+/.git/config
+/.git/HEAD
+/.svn
+/.svn/
+/.hg/
+/.DS_Store
+/Thumbs.db
+
+# --- environment & config ---
+/.env
+/.env.local
+/.env.production
+/.env.backup
+/.env.bak
+/.env.example
+/config.php
+/config.php.bak
+/config.php.old
+/wp-config.php
+/wp-config.php.bak
+/config.yml
+/config.yaml
+/config.json
+/application.yml
+/settings.py
+/local_settings.py
+/database.yml
+/db.php
+/.htaccess
+/.htpasswd
+/web.config
+/web.config.bak
+/php.ini
+/.user.ini
+
+# --- backups, dumps & archives ---
+/backup
+/backups/
+/backup.zip
+/backup.tar.gz
+/backup.sql
+/db.sql
+/dump.sql
+/database.sql
+/export.sql
+/site.zip
+/www.zip
+/.bak/
+/.old/
+
+# --- diagnostics & debug ---
+/info.php
+/phpinfo.php
+/debug.php
+/test.php
+/server-status
+/server-info
+/elmah.axd
+/trace.axd
+/actuator/
+/actuator/health
+/actuator/env
+
+# --- logs ---
+/logs/
+/access.log
+/error.log
+/debug.log
+
+# --- api & docs ---
+/api/
+/api/v1
+/api/v2
+/api/docs
+/swagger/
+/swagger.json
+/openapi.json
+/graphql
+/graphiql
+/.well-known/security.txt
+/.well-known/openid-configuration
+/robots.txt
+/sitemap.xml
+/crossdomain.xml
+
+# --- admin panels ---
+/admin
+/admin/
+/admin.php
+/login
+/login.php
+/wp-admin
+/wp-login.php
+/dashboard
+/panel/
+/cpanel
+/webmail
+/phpmyadmin/
+/administrator/
+
+# --- cms & app paths ---
+/wp-content
+/wp-includes
+/wp-json
+/xmlrpc.php
+/console
+/manager

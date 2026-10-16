@@ -131,7 +131,7 @@ class AuthorizationResult:
 
 
 class ToolConfirmationPolicy:
-    """Per-tool human-in-the-loop gate (RedAmon port, Athena-safe defaults).
+    """Per-tool human-in-the-loop gate (Athena native, safe defaults).
 
     Dangerous tools pause for Allow/Deny unless auto_approve is set (labs only).
     Non-dangerous tools always pass. Never raises.

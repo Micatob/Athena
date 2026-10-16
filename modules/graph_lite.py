@@ -1,5 +1,5 @@
 """
-Athena Omega - Lightweight Attack Graph (RedAmon port, no Neo4j)
+Athena Omega - Lightweight Attack Graph (Athena native, SQLite)
 ===============================================================
 SQLite-backed MERGE graph: duplicate writes update, never duplicate.
 Tenant key = engagement_id. Single source of truth for recon findings.

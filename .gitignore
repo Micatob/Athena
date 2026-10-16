@@ -34,8 +34,16 @@ test_*.log
 # Reports
 report_*.json
 report_*.html
+report_*.sarif
+report_*.csv
+report_*.pdf
 guide_*.md
 post_exploit_*.json
+
+# Local scan transcripts (console captures, never source)
+fullscan.txt
+scan_*.txt
+scan_*.log
 
 # Runtime caches & scan state (regenerated, never committed)
 .athena_kev_cache.json

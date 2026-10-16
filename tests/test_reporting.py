@@ -313,3 +313,84 @@ class TestReportHardening:
         report = gen.generate_comprehensive_report(_results())
         # reportlab may be absent; PDF generation must degrade, not raise.
         assert gen.generate_pdf_report(report, str(tmp_path / "r.pdf")) in (True, False)
+
+
+class TestSarifExport:
+    def _sarif(self, vulns):
+        from modules.reporting import build_sarif
+        return build_sarif("https://target.example", vulns)
+
+    def test_sarif_envelope(self):
+        log = self._sarif([])
+        assert log["version"] == "2.1.0"
+        assert log["runs"][0]["tool"]["driver"]["name"] == "Athena Security Suite"
+        assert log["runs"][0]["results"] == []
+        assert log["runs"][0]["tool"]["driver"]["rules"] == []
+
+    def test_sarif_severity_mapping(self):
+        log = self._sarif([
+            {"type": "SQL Injection", "severity": "CRITICAL",
+             "url": "https://t/a?id=1", "description": "sqli"},
+            {"type": "Missing Security Header", "severity": "MEDIUM",
+             "url": "https://t/", "description": "no hsts"},
+            {"type": "Info Leak", "severity": "INFO",
+             "url": "https://t/i", "description": "banner"},
+        ])
+        levels = {r["ruleId"]: r["level"] for r in log["runs"][0]["results"]}
+        assert levels["athena/sql-injection"] == "error"
+        assert levels["athena/missing-security-header"] == "warning"
+        assert levels["athena/info-leak"] == "note"
+
+    def test_sarif_rule_ids_stable_and_deduped(self):
+        log = self._sarif([
+            {"type": "XSS", "severity": "HIGH", "url": "https://t/1"},
+            {"type": "XSS", "severity": "HIGH", "url": "https://t/2"},
+        ])
+        run = log["runs"][0]
+        assert [r["id"] for r in run["tool"]["driver"]["rules"]] == ["athena/xss"]
+        assert len(run["results"]) == 2
+        assert run["results"][0]["locations"][0]["physicalLocation"][
+            "artifactLocation"]["uri"] == "https://t/1"
+
+    def test_sarif_drops_non_dicts_and_missing_url(self):
+        log = self._sarif([None, "xss", {"type": "XSS", "severity": "HIGH"}])
+        results = log["runs"][0]["results"]
+        assert len(results) == 1
+        assert "locations" not in results[0]
+
+    def test_sarif_carries_verification(self):
+        log = self._sarif([{
+            "type": "SQL Injection", "severity": "CRITICAL",
+            "url": "https://t/a", "verified": True,
+            "verification": {"status": "confirmed"},
+        }])
+        props = log["runs"][0]["results"][0]["properties"]
+        assert props["athenaVerification"] == "confirmed"
+        assert props["athenaVerified"] is True
+
+    def test_export_to_sarif_writes_file(self, tmp_path):
+        gen = ReportGenerator()
+        path = str(tmp_path / "r.sarif")
+        gen.export_to_sarif(
+            {"target": "t", "vulnerabilities": [
+                {"type": "XSS", "severity": "HIGH", "url": "https://t/"}]},
+            path)
+        with open(path, encoding="utf-8") as fh:
+            log = json.load(fh)
+        assert log["version"] == "2.1.0"
+        assert len(log["runs"][0]["results"]) == 1
+
+    def test_history_export_sarif(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ATHENA_DB_PATH", str(tmp_path / "h.db"))
+        from modules.scan_store import ScanStore, export_scan
+        store = ScanStore()
+        try:
+            sid = store.record_scan(
+                "https://t", "vuln", "complete", {},
+                [{"type": "XSS", "severity": "HIGH", "url": "https://t/"}])
+            content = export_scan(store, sid, "sarif")
+            assert content is not None
+            log = json.loads(content)
+            assert log["runs"][0]["results"][0]["ruleId"] == "athena/xss"
+        finally:
+            store.close()

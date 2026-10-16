@@ -149,6 +149,12 @@ Examples:
     )
     parser.add_argument('-t', '--target', help='Target URL/IP/hostname')
     parser.add_argument('-f', '--target-file', help='File with targets (one per line, CIDR, or IP range)')
+    try:
+        from modules import ATHENA_VERSION as _ATHENA_VERSION
+    except Exception:
+        _ATHENA_VERSION = '1.0.0'
+    parser.add_argument('--version', action='version',
+                        version=f'%(prog)s {_ATHENA_VERSION}')
     parser.add_argument('-m', '--mode',
                         choices=['full', 'discovery', 'vuln', 'bruteforce', 'recon', 'all',
                                  '1', '2', '3', '4'],
@@ -169,8 +175,8 @@ Examples:
     parser.add_argument('--tor', action='store_true', help='Route through Tor')
     parser.add_argument('--random-agent', action='store_true', default=True, help='Rotate user agents')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('-o', '--output', choices=['html', 'json', 'csv', 'pdf', 'all'], default='html',
-                        help='Output format (default: html)')
+    parser.add_argument('-o', '--output', choices=['html', 'json', 'csv', 'pdf', 'sarif', 'all'], default='html',
+                        help='Output format (default: html). sarif feeds VS Code Problems + GitHub code scanning')
     parser.add_argument('--resume', action='store_true', help='Resume from last interrupted scan')
     parser.add_argument('--pause', action='store_true', help='Pause after each phase')
     parser.add_argument('--guide', nargs='?', const='', help='Show PTES operations guide')
@@ -238,7 +244,7 @@ Examples:
                                help='List recent finished scans from the local '
                                     'SQLite history and exit')
     history_group.add_argument('--export-history', metavar='SCAN_ID',
-                               help='Re-emit a stored scan (json/csv via '
+                               help='Re-emit a stored scan (json/csv/sarif via '
                                     '--output) to --export path (or stdout) '
                                     'and exit')
     history_group.add_argument('--store',
@@ -341,8 +347,13 @@ Examples:
     orchestration_group.add_argument('--preflight', action='store_true',
                                      help='Explain operations before executing '
                                           '(authorization, scope, expected evidence)')
+    orchestration_group.add_argument('--confirm-dangerous', action='store_true',
+                                     help='Interactive Allow/Deny prompt before each '
+                                          'external tool wave (nuclei, sqlmap, dalfox) '
+                                          'and automated exploitation. Default off so '
+                                          'agents, API mode and CI stay non-interactive')
 
-    omega_group = parser.add_argument_group('Omega Fusion (RedAmon port)')
+    omega_group = parser.add_argument_group('Omega recon pack')
     omega_group.add_argument('--no-omega', action='store_true',
                              help='Skip the Omega recon pack (TLS/GraphQL/takeover/vhost/origin/JS/serialized/supply-chain)')
     omega_group.add_argument('--omega-tools', default='',
@@ -783,6 +794,46 @@ async def _resumable_stage(ckpt, stage: str, runner, resume: bool = False):
         except Exception as exc:
             cprint(f"  [!] Checkpoint save failed for stage '{stage}': {exc}")
     return result, False
+
+
+def _confirm_wave(label: str, target: str, args) -> bool:
+    """Interactive Allow/Deny for one tool wave (``--confirm-dangerous``).
+
+    Returns True to proceed.  Off by default so agents, API mode and CI
+    stay non-interactive; when the flag is set but stdin is not a TTY
+    (piped/CI), the wave proceeds with one honest line instead of hanging.
+    Never raises.
+    """
+    try:
+        if not bool(getattr(args, 'confirm_dangerous', False)):
+            return True
+    except Exception:
+        return True
+    try:
+        if not sys.stdin.isatty():
+            cprint(f"  [*] --confirm-dangerous set but stdin is not interactive; "
+                   f"allowing {label}")
+            return True
+    except Exception:
+        return True
+    try:
+        answer = input(f"  [?] Run {label} against {target}? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        cprint(f"  [*] {label} declined (no answer) - skipped")
+        return False
+    except Exception:
+        return True
+    if answer in ('y', 'yes'):
+        return True
+    cprint(f"  [*] {label} declined by operator - skipped")
+    return False
+
+
+def _declined_summary(tool: str) -> Dict[str, Any]:
+    """Honest skipped record so declined waves stay visible in reports."""
+    return {'tool': tool, 'status': 'skipped', 'binary': '',
+            'reason': 'declined by operator (--confirm-dangerous)',
+            'findings': [], 'matched': 0, 'duration_s': 0.0, 'argv': []}
 
 
 async def run_external_scan(target: str, stealth: bool = False,
@@ -1350,8 +1401,8 @@ def _run_history_command(args) -> None:
                        f"got {export_id!r} (see --history)")
                 return
             fmt = str(getattr(args, "output", "json") or "json").lower()
-            if fmt not in ("json", "csv"):
-                cprint("  [!] History export supports json/csv only "
+            if fmt not in ("json", "csv", "sarif"):
+                cprint("  [!] History export supports json/csv/sarif only "
                        "(full HTML reports are produced live)")
                 return
             content = export_scan(store, scan_id, fmt)
@@ -1479,6 +1530,11 @@ def generate_report(target: str, discovery: Dict[str, Any], vulnerabilities: Lis
         csv_path = f"{output_path}.csv"
         report_gen.export_to_csv(report_data, csv_path)
         cprint(f"  [+] CSV report: {csv_path}")
+
+    if output_format in ('sarif', 'all'):
+        sarif_path = f"{output_path}.sarif"
+        report_gen.export_to_sarif(report_data, sarif_path)
+        cprint(f"  [+] SARIF report: {sarif_path}")
 
     if output_format in ('pdf', 'all'):
         pdf_path = f"{output_path}.pdf"
@@ -2380,6 +2436,20 @@ async def run_auto_exploitation(target: str, vulnerabilities: List[Dict[str, Any
     """
     from modules.exploitation_runner import ExploitationRunner
 
+    # Operator confirmation gate: one Allow/Deny before verification sends
+    # any payload.  Off by default (agents/CI unaffected).
+    if not _confirm_wave('automated exploitation', target, args):
+        return {
+            'status': 'denied',
+            'scope_reason': 'declined by operator (--confirm-dangerous)',
+            'mode': 'aggressive' if getattr(args, 'exploit_aggressive', False) else 'safe',
+            'attempted': 0, 'confirmed': 0, 'possible': 0, 'inconclusive': 0,
+            'attempts': [], 'duration_ms': 0,
+            'detected': len(vulnerabilities or []), 'candidates': 0,
+            'max_findings': getattr(args, 'exploit_max', 100),
+            'coverage_pct': 0.0, 'capped': False,
+        }
+
     # Reachability gate: verifying findings against a host that already
     # blocks us burns request_timeout per finding (40s x N) for nothing but
     # timeout lines. Skip with one honest line instead.
@@ -2748,7 +2818,7 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 cprint("  [!] Later phases fall back to the target URL only. "
                        "This run will be marked PARTIAL.\n")
 
-        # OMEGA PACK - RedAmon fan-out recon (TLS/GraphQL/takeover/vhost/origin/JS).
+        # OMEGA PACK - Athena fan-out recon (TLS/GraphQL/takeover/vhost/origin/JS).
         # Additive: never replaces discovery, only appends evidence-backed findings.
         # Skip on resume-with-checkpoint, skip with --no-omega, never raises.
         if (not getattr(args, 'no_omega', False)
@@ -2897,8 +2967,11 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 # are evidence-backed and go through AI triage like our own
                 # findings.
                 with _phase('nuclei'):
-                    nuclei_summary = await run_external_scan(
-                        target, stealth, args, native_findings=_vulns)
+                    if _confirm_wave('nuclei template scan', target, args):
+                        nuclei_summary = await run_external_scan(
+                            target, stealth, args, native_findings=_vulns)
+                    else:
+                        nuclei_summary = _declined_summary('nuclei')
                 if nuclei_summary:
                     _summaries.append(nuclei_summary)
                     extra = [v for v in (nuclei_summary.get('findings') or [])
@@ -2911,7 +2984,10 @@ async def run_scan_session(targets: List[str], args: argparse.Namespace) -> None
                 # findings join AI triage and the exploitation runner untouched.
                 with _phase('external tools'):
                     try:
-                        extended = await run_extended_tools(target, args, scan_urls)
+                        if _confirm_wave('sqlmap/dalfox/wafw00f/httpx probes', target, args):
+                            extended = await run_extended_tools(target, args, scan_urls)
+                        else:
+                            extended = [_declined_summary('extended-tools')]
                     except Exception as exc:  # pragma: no cover - never break scan
                         cprint(f"  [!] Extended tools aborted: {exc}")
                         extended = []
@@ -3992,9 +4068,9 @@ def create_app(safe_mode: bool = True) -> Flask:
         if auth_err:
             return auth_err
         fmt = str(request.args.get('format', 'json')).lower()
-        if fmt not in ('json', 'csv'):
+        if fmt not in ('json', 'csv', 'sarif'):
             return jsonify({'error': 'Bad request',
-                            'detail': "format must be 'json' or 'csv' "
+                            'detail': "format must be 'json', 'csv' or 'sarif' "
                                       "(full HTML reports are produced live)"}), 400
         try:
             from modules.scan_store import export_scan, open_store
@@ -4019,6 +4095,11 @@ def create_app(safe_mode: bool = True) -> Flask:
             resp = app.response_class(content, mimetype='text/csv')
             resp.headers['Content-Disposition'] = (
                 f'attachment; filename="athena_scan_{scan_id}.csv"')
+            return resp
+        if fmt == 'sarif':
+            resp = app.response_class(content, mimetype='application/sarif+json')
+            resp.headers['Content-Disposition'] = (
+                f'attachment; filename="athena_scan_{scan_id}.sarif"')
             return resp
         return app.response_class(content, mimetype='application/json')
 

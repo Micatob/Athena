@@ -1,5 +1,5 @@
 """
-Athena Omega - Hard Guardrail + Rules of Engagement (RedAmon port)
+Athena Omega - Hard Guardrail + Rules of Engagement (Athena native)
 ================================================================
 Deterministic, non-disableable block for gov/mil/edu/int + operator denylist.
 RoE binds targets, exclusions, allowed techniques, time window, rate limits.

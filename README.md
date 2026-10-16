@@ -186,7 +186,7 @@ Key variables (all optional; sane defaults exist):
 | `SCANNING_THREADS` / `DISCOVERY_THREADS` | 10 / 5 | Concurrency |
 | `LOG_FILE` / `AUDIT_LOG_FILE` | `aethelred.log` / `athena_audit.log` | Log destinations |
 | `PCI_AUDIT_ENABLED` / `GDPR_LOGGING_ENABLED` | `true` | Compliance audit events |
-| `DEFAULT_WORDLIST` | `common_files.txt` | Directory-bruteforce wordlist (⚠️ file not shipped — see gaps) |
+| `DEFAULT_WORDLIST` | `common_files.txt` | Content-discovery wordlist (shipped, ~95 paths; override path via env) |
 
 **Payloads & WAF bypass:** `config/payloads.json` holds WAF-bypass techniques and payload templates. Extend it or register payloads at runtime via `modules/payload_manager.py` (`payload_manager.register_payload(...)`, `payload_manager.load_custom_payloads('my.json')`).
 
@@ -265,11 +265,11 @@ python athena.py --history                          # list recent scans
 python athena.py --export-history 12 --export out --output csv   # re-emit findings
 ```
 
-API mode (`-m api` / `--api`) additionally serves `GET /scans`, `GET /scans/<id>`, `GET /scans/<id>/export?format=json|csv`. Scan jobs posted to `POST /scan` are tracked durably - a server restart requeues interrupted jobs instead of losing them (`/scan/status/<id>` still resolves afterwards).
+API mode (`-m api` / `--api`) additionally serves `GET /scans`, `GET /scans/<id>`, `GET /scans/<id>/export?format=json|csv|sarif`. Scan jobs posted to `POST /scan` are tracked durably - a server restart requeues interrupted jobs instead of losing them (`/scan/status/<id>` still resolves afterwards).
 
 ### 4. Output formats (`-o` / `--output`)
 
-`html` *(default)*, `json`, `csv`, `pdf`, or `all`. Reports are written to `report_<target>.*` in the project root, or to a custom path with `--export <path>`.
+`html` *(default)*, `json`, `csv`, `pdf`, `sarif`, or `all`. Reports are written to `report_<target>.*` in the project root, or to a custom path with `--export <path>`. `sarif` (also via `--export-history` and `/scans/<id>/export?format=sarif`) feeds the VS Code Problems panel and GitHub code scanning with stable `athena/<slug>` rule ids - see `docs/VSCODE_AGENT.md` for the editor/agent contract.
 
 ### 5. Session control
 
@@ -305,8 +305,10 @@ python athena.py -t TARGET -m MODE [options]
 | `--rate`, `--concurrent`, `--jitter` | Engine tuning |
 | `--proxy`, `--tor`, `--random-agent` | Evasion / routing |
 | `-v, --verbose` | DEBUG-level logging |
-| `-o, --output` | `html` \| `json` \| `csv` \| `pdf` \| `all` |
+| `-o, --output` | `html` \| `json` \| `csv` \| `pdf` \| `sarif` \| `all` |
 | `--resume` / `--pause` | Session control |
+| `--confirm-dangerous` | Interactive Allow/Deny before nuclei, sqlmap/dalfox/wafw00f/httpx, and automated exploitation (default off) |
+| `--version` | Print the Athena release version and exit |
 | `--guide` / `--list-plugins` | Docs & extension tooling |
 | `--list-tools` | Show detected external tools (binary, version, templates) and exit |
 | `--no-nuclei` | Skip the external nuclei template engine (runs automatically when installed) |
@@ -818,7 +820,7 @@ All responses include mandatory security headers; `/scan` and `/scan/url` are ra
 
 The following items are **documented but incomplete** in the current codebase:
 
-1. **Directory-bruteforce wordlist not shipped.** `FrameworkConfig.DEFAULT_WORDLIST = 'common_files.txt'` but the file does not exist in the repo, so content discovery may fail silently.
+1. **DONE (v1.0.0): content-discovery wordlist shipped.** `common_files.txt` (~95 curated paths) is loaded by `modules/hidden_asset_scanner.py` (`load_path_wordlist()`/`active_paths()`), honouring `FrameworkConfig.DEFAULT_WORDLIST` (env `DEFAULT_WORDLIST`); missing file falls back to the built-in list.
 
 2. **Chrome extension is untested against a real server.** `extension/` expects the Flask server on `http://127.0.0.1:5000` (now implemented — start it with `python athena.py --api`).
 
@@ -828,17 +830,17 @@ The following items are **documented but incomplete** in the current codebase:
 
 ### Omega-era gaps (verified 2026-10-15 on a live ModSecurity host — implement one day)
 
-5. **Chromium missing → headless crawl skips.** `playwright` PyPI package installs, but `chromium-1234/chrome.exe` is absent, so every run logs `Headless crawl skipped`. JS-rendered routes are never seen. Fix (once): `playwright install chromium`. No code change needed — `run_coverage_stage` picks it up automatically.
+5. **Chromium deferred (data budget).** `playwright` installs, but the ~170 MB browser download is intentionally skipped on metered links — every run logs `Headless crawl skipped` until the operator runs `playwright install chromium` with data to spare. Detection, auth, and vuln scanning are unaffected; `run_coverage_stage` picks Chromium up automatically once present.
 
-6. **sqlmap missing → SQLi never confirmed.** `run_extended_tools` logs `Sqlmap unavailable` and continues. Dalfox covers XSS, nothing covers SQLi confirmation. Fix: `python scripts/install_tools.py --only sqlmap` (or `sudo apt install sqlmap`). Bounded (1 URL, level 1/risk 1, 300s) when present.
+6. **DONE (v1.0.0): sqlmap installed.** `python scripts/install_tools.py --only sqlmap` fetched the engine; `run_extended_tools` now confirms SQLi (bounded: 1 URL, level 1/risk 1, 300s). Re-run the installer after moving machines.
 
 7. **Gemini auth-key format (post May-2026).** Google AI Studio now issues auth keys (`AQ.Ab...`) instead of `AIza...` standard keys; unrestricted standard keys are rejected. Athena accepts both formats and lets the API decide (`configured_providers()`), but an unrestricted/orphaned key still fails with an empty `LLM call failed (gemini):` line. Fix: AI Studio → key → **Restrict to Gemini API only** + enable `generativelanguage.googleapis.com`. Until then Groq-only (`providers: ['groq']`) is the correct working state.
 
-8. **Single-LLM rate limits on big scans.** Groq free tier 429s after ~70 findings (`rate limited 3x; cooling down 60s`), leaving AI triage degraded. Deterministic dedup still runs, but narratives/flagging thin out. Fix: add `DEEPSEEK_API_KEY` as second failover, or `NVD_API_KEY` (50 req/30s vs 5/30s) to cut keyword-fallback CVE noise (e.g. stale `CVE-1999/2000` Apache guesses).
+8. **Single-LLM rate limits on big scans (optional keys documented).** Groq free tier 429s after ~70 findings (`rate limited 3x; cooling down 60s`), leaving AI triage degraded. Deterministic dedup still runs, but narratives/flagging thin out. Optional, data-free fixes now in `.env.example`: `DEEPSEEK_API_KEY` as second failover, `NVD_API_KEY` (50 req/30s vs 5/30s) to cut keyword-fallback CVE noise.
 
 9. **Dalfox vs WAF tarpitting.** `dalfox run failed ... timed out after 300s` on `/admin.php`, `/config.php.old` — ModSecurity holds the connection open. Bounded per-URL timeout contains it (scan continues), but those URLs get `0 XSS` by timeout, not by proof. Future: adaptive per-host backoff + early WAF-block abort instead of full 300s wait.
 
-10. **No Restricted-Technique confirmation UI in CLI.** `ToolConfirmationPolicy` (nmap/nuclei/metasploit/hydra/kali_shell/sqlmap/persistence) exists and gates `OperationGate`, but CLI runs default `auto_approve` for non-interactive scans. Future: `--confirm-dangerous` interactive Allow/Deny prompt per tool wave (RedAmon has this in chat; Athena needs the CLI equivalent).
+10. **DONE (v1.0.0): Restricted-Technique confirmation UI in CLI.** `--confirm-dangerous` prompts interactive Allow/Deny per tool wave (nuclei, sqlmap/dalfox/wafw00f/httpx, automated exploitation); declined waves are recorded as `skipped` in reports. Default off so agents, API mode, and CI stay non-interactive.
 
 ### Recently Added Features
 

@@ -379,6 +379,88 @@ ATTACK_KB_MAP = [
 ]
 
 
+#: Athena severity -> SARIF level.  SARIF has no CRITICAL, so critical and
+#: high both surface as errors (VS Code red), medium as warnings, the rest
+#: as notes.  Unknown/empty severities degrade to note, never crash.
+SARIF_LEVELS = {
+    'CRITICAL': 'error',
+    'HIGH': 'error',
+    'MEDIUM': 'warning',
+    'LOW': 'note',
+    'INFO': 'note',
+    '': 'note',
+}
+
+
+def _sarif_rule_id(vuln_type: str) -> str:
+    """Stable rule id from a finding type, e.g. 'SQL Injection' -> 'sql-injection'."""
+    slug = ''.join(c.lower() if c.isalnum() else '-' for c in str(vuln_type or 'finding'))
+    slug = '-'.join(filter(None, slug.split('-')))
+    return f"athena/{slug or 'finding'}"
+
+
+def build_sarif(target: Any, vulnerabilities: Any) -> Dict[str, Any]:
+    """Build a SARIF 2.1.0 log from Athena findings (pure, never raises).
+
+    Shared by live ``export_to_sarif`` and history re-exports so the
+    VS Code extension and GitHub code scanning see identical rule ids.
+    Non-dict findings are dropped; missing fields degrade gracefully.
+    """
+    try:
+        from modules import ATHENA_VERSION as _ver
+    except Exception:
+        _ver = "1.0.0"
+    vulns = [v for v in (vulnerabilities or []) if isinstance(v, dict)]
+    rules: Dict[str, Dict[str, Any]] = {}
+    results: List[Dict[str, Any]] = []
+    for v in vulns:
+        vtype = str(v.get('type') or 'Finding')
+        rule_id = _sarif_rule_id(vtype)
+        if rule_id not in rules:
+            rules[rule_id] = {
+                'id': rule_id,
+                'name': vtype,
+                'shortDescription': {'text': vtype},
+                'fullDescription': {'text': str(v.get('description') or vtype)[:1000]},
+            }
+        level = SARIF_LEVELS.get(str(v.get('severity') or '').upper(), 'note')
+        uri = str(v.get('url') or '')
+        message = str(v.get('description') or vtype)
+        evidence = v.get('evidence')
+        if isinstance(evidence, dict) and evidence.get('proof'):
+            message = f"{message} | Proof: {evidence['proof']}"[:2000]
+        result: Dict[str, Any] = {
+            'ruleId': rule_id,
+            'level': level,
+            'message': {'text': message[:2000]},
+        }
+        if uri:
+            result['locations'] = [{
+                'physicalLocation': {'artifactLocation': {'uri': uri}},
+            }]
+        verification = v.get('verification')
+        if isinstance(verification, dict) and verification.get('status'):
+            result['properties'] = {
+                'athenaVerification': str(verification.get('status')),
+                'athenaVerified': bool(v.get('verified')),
+            }
+        results.append(result)
+    return {
+        '$schema': 'https://json.schemastore.org/sarif-2.1.0.json',
+        'version': '2.1.0',
+        'runs': [{
+            'tool': {'driver': {
+                'name': 'Athena Security Suite',
+                'version': str(_ver),
+                'informationUri': 'https://github.com/Micatob/Athena',
+                'rules': sorted(rules.values(), key=lambda r: r['id']),
+            }},
+            'automationDetails': {'id': f"athena/{target or 'unknown'}"},
+            'results': results,
+        }],
+    }
+
+
 class ReportGenerator:
     """Professional report generator focused on security auditing and remediation."""
 
@@ -1635,6 +1717,14 @@ class ReportGenerator:
                     'URL': v.get('url', ''),
                     'Description': v.get('description', '')
                 })
+
+    def export_to_sarif(self, results: Dict[str, Any], filename: str) -> None:
+        """Export vulnerabilities to SARIF 2.1.0 (VS Code / GitHub code scanning)."""
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(build_sarif(
+                results.get('target', 'unknown'),
+                results.get('vulnerabilities', []) or [],
+            ), f, indent=2, default=str)
 
     def export_to_xml(self, results: Dict[str, Any], filename: str) -> None:
         """Export results to XML."""

@@ -300,10 +300,12 @@ class ScanStore:
 
 def export_scan(store: ScanStore, scan_id: int,
                 format: str = "json") -> Optional[Any]:
-    """Re-emit a stored scan: JSON string or CSV string (None if missing).
+    """Re-emit a stored scan: JSON/CSV string, SARIF string, else None.
 
     History exports cover findings + summary.  Full HTML reports are only
     produced live (they need the discovery payload, which is not stored).
+    SARIF uses the same rule ids as live reports (``reporting.build_sarif``)
+    so IDE consumers see one stable contract.
     """
     scan = store.get_scan(scan_id)
     if not scan:
@@ -322,6 +324,15 @@ def export_scan(store: ScanStore, scan_id: int,
                              finding.get("type", ""),
                              finding.get("url", ""), str(detail)[:500]])
         return buf.getvalue()
+    if kind == "sarif":
+        try:
+            from modules.reporting import build_sarif
+            return json.dumps(
+                build_sarif(scan.get("target", "unknown"), findings),
+                indent=2, default=str)
+        except Exception as exc:
+            logger.debug("sarif export failed: %s", exc)
+            return None
     return json.dumps({"scan": scan, "findings": findings}, indent=2,
                       default=str)
 

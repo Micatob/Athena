@@ -3,7 +3,10 @@ import asyncio
 import os
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
-from modules.hidden_asset_scanner import HiddenAssetScanner, HIDDEN_PATHS, BACKUP_EXTENSIONS
+from modules.hidden_asset_scanner import (
+    HiddenAssetScanner, HIDDEN_PATHS, BACKUP_EXTENSIONS,
+    load_path_wordlist, active_paths,
+)
 from modules.ai_integration import AIIntegration, AIProvider
 
 
@@ -290,6 +293,41 @@ class TestPostExploitationEnhancements:
         sig = inspect.signature(SystemEnumerator._enum_backup_files_linux)
         assert "session" in sig.parameters
         assert "deadline" in sig.parameters
+
+
+class TestShippedWordlist:
+    def test_shipped_wordlist_loads(self):
+        paths = load_path_wordlist()
+        assert len(paths) > 50
+        assert "/.git/config" in paths
+        assert "/.env" in paths
+        assert all(p.startswith("/") for p in paths)
+
+    def test_shipped_wordlist_skips_comments_and_blanks(self, tmp_path):
+        f = tmp_path / "words.txt"
+        f.write_text("# comment\n\nadmin\n/login.php\nadmin\n")
+        from modules import framework_config as fc
+        old = fc.FrameworkConfig.DEFAULT_WORDLIST
+        fc.FrameworkConfig.DEFAULT_WORDLIST = str(f)
+        try:
+            paths = load_path_wordlist()
+        finally:
+            fc.FrameworkConfig.DEFAULT_WORDLIST = old
+        assert paths == ["/admin", "/login.php"]
+
+    def test_active_paths_falls_back_when_file_missing(self, monkeypatch):
+        from modules import framework_config as fc
+        old = fc.FrameworkConfig.DEFAULT_WORDLIST
+        fc.FrameworkConfig.DEFAULT_WORDLIST = "definitely_not_here_12345.txt"
+        try:
+            assert load_path_wordlist() == []
+            assert active_paths() == list(HIDDEN_PATHS)
+        finally:
+            fc.FrameworkConfig.DEFAULT_WORDLIST = old
+
+    def test_active_paths_prefers_shipped_file(self):
+        assert active_paths() == load_path_wordlist()
+        assert len(active_paths()) > 50
 
 
 if __name__ == "__main__":

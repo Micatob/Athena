@@ -1,5 +1,5 @@
 """
-Athena Omega - VHost/SNI enumeration (RedAmon dual-layer concept)
+Athena Omega - VHost/SNI enumeration (Athena native dual-layer)
 Curl-only logic ported to aiohttp: L7 Host-header overrides compared to
 baseline. CDN catch-all guard via control names. Never raises.
 """

@@ -1,5 +1,5 @@
 """
-Athena Omega - Recon Orchestrator (RedAmon fan-out/fan-in, Athena scale)
+Athena Omega - Recon Orchestrator (Athena native fan-out/fan-in)
 =====================================================================
 Runs independent recon tools concurrently, converges, merges into graph_lite.
 Every tool: timeout + never-raise + structured status. Missing dep = skip line.
