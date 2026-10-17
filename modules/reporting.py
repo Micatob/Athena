@@ -1628,19 +1628,24 @@ class ReportGenerator:
 
         elif 'phpinfo' in vtype.lower():
             techniques.append(f"**Target URL:** `{url}`")
-            techniques.append(f"**Reproduce:** `{payload or f'curl -sk \"{url}\" | grep -i -m3 \"php version\"'}`")
+            # Hoisted: backslashes inside an f-string EXPRESSION are a
+            # SyntaxError before Python 3.12 (CI parses on 3.11).
+            _repro = payload or f'curl -sk "{url}" | grep -i -m3 "php version"'
+            techniques.append(f"**Reproduce:** `{_repro}`")
             techniques.append(f"**Harvest:** scopes, env vars, paths and loaded extensions feed version-specific CVE targeting (`Server`, `phpinfo()` -> public CVE match)")
             techniques.append(f"**Fix:** remove the phpinfo script from production; block `info.php/phpinfo.php` at the web server")
 
         elif 'sensitive' in vtype.lower() or 'exposed' in vtype.lower():
             techniques.append(f"**Target URL:** `{url}`")
-            techniques.append(f"**Reproduce:** `{payload or f'curl -sk \"{url}\" -o proof.dat && file proof.dat'}`")
+            _repro = payload or f'curl -sk "{url}" -o proof.dat && file proof.dat'
+            techniques.append(f"**Reproduce:** `{_repro}`")
             techniques.append(f"**Harvest:** download and grep for credentials, keys and internal paths; pair versions with public CVEs")
             techniques.append(f"**Fix:** remove the exposed file from web root; deny dotfiles/backups at the web server")
 
         elif 'directory listing' in vtype.lower():
             techniques.append(f"**Target URL:** `{url}`")
-            techniques.append(f"**Reproduce:** `{payload or f'curl -sk \"{url}\" | grep -i -m5 \"index of\\|href\"'}`")
+            _repro = payload or f'curl -sk "{url}" | grep -i -m5 "index of\\|href"'
+            techniques.append(f"**Reproduce:** `{_repro}`")
             techniques.append(f"**Harvest:** enumerate listed files; direct-fetch sensitive extensions and backup variants (`.bak/.old/~/.swp`)")
             techniques.append(f"**Fix:** disable autoindex / directory browsing on the web server")
 
