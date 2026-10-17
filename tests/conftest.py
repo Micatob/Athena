@@ -39,6 +39,36 @@ HERE = Path(__file__).parent.parent  # project root
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+# ---------------------------------------------------------------------------
+# aiohttp >= 3.14 compat for aioresponses 0.7.9 (no upstream fix as of
+# 2026-10-17).  ClientResponse.__init__ gained a required keyword-only
+# ``stream_writer`` argument; aioresponses constructs ClientResponse directly
+# without it -> TypeError -> mocks never intercept and every mocked HTTP test
+# fails.  This injects a null writer unless the caller already passed one
+# (real aiohttp call sites always pass one).  Remove once aioresponses
+# ships a fix.
+# ---------------------------------------------------------------------------
+class _NullStreamWriter:
+    output_size = 0
+
+
+def _patch_aioresponses_for_aiohttp314() -> None:
+    import aiohttp
+    ver = tuple(int(x) for x in aiohttp.__version__.split(".")[:2])
+    if ver < (3, 14):
+        return
+    orig_init = aiohttp.ClientResponse.__init__
+
+    def _init_with_default_stream_writer(self, *args, **kwargs):
+        if "stream_writer" not in kwargs:
+            kwargs["stream_writer"] = _NullStreamWriter()
+        return orig_init(self, *args, **kwargs)
+
+    aiohttp.ClientResponse.__init__ = _init_with_default_stream_writer
+
+
+_patch_aioresponses_for_aiohttp314()
+
 
 # ---------------------------------------------------------------------------
 # Environment fixtures

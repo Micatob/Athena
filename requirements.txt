@@ -1,7 +1,7 @@
 # Athena Security Suite Dependencies
 # ========================================
 # Core
-aiohttp>=3.9.0,<3.14  # 3.14 breaks aioresponses' ClientSession patching (CI 2026-10-17)
+aiohttp>=3.14.0  # 3.14.0+ fixes PYSEC-2026-* advisories; tests shim aioresponses via tests/conftest.py
 beautifulsoup4>=4.12.0
 psutil>=5.9.0
 dnspython>=2.6.0
