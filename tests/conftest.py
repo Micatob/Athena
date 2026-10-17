@@ -48,6 +48,8 @@ if str(HERE) not in sys.path:
 # (real aiohttp call sites always pass one).  Remove once aioresponses
 # ships a fix.
 # ---------------------------------------------------------------------------
+
+
 class _NullStreamWriter:
     output_size = 0
 
