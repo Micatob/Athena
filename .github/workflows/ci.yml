@@ -71,22 +71,28 @@ jobs:
           file: ./coverage.xml
           fail_ci_if_error: false
 
-  docker:
-    runs-on: ubuntu-latest
-    needs: [test]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ghcr.io/micatob/athena:latest,ghcr.io/micatob/athena:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+  # Docker build/push job DISABLED 2026-10-17 by operator decision.
+  # Status: GHCR tag lowercase fix already applied (ghcr.io/micatob/athena);
+  # remaining failure was the first cold build (no cache) which the operator
+  # chose not to pursue. To re-enable: restore the job block below and it
+  # should build (Dockerfile uses python:3.11-slim, requirements resolve).
+  #
+  # docker:
+  #   runs-on: ubuntu-latest
+  #   needs: [test]
+  #   if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: docker/setup-buildx-action@v3
+  #     - uses: docker/login-action@v3
+  #       with:
+  #         registry: ghcr.io
+  #         username: ${{ github.actor }}
+  #         password: ${{ secrets.GITHUB_TOKEN }}
+  #     - uses: docker/build-push-action@v6
+  #       with:
+  #         context: .
+  #         push: true
+  #         tags: ghcr.io/micatob/athena:latest,ghcr.io/micatob/athena:${{ github.sha }}
+  #         cache-from: type=gha
+  #         cache-to: type=gha,mode=max

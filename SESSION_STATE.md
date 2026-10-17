@@ -1195,3 +1195,48 @@ Operator's live scan (ogitech.edu.ng) showed three failures at once:
 ## Git
 - Previous commit this session: 20c036c (OpenRouter failover +
   disclosure verification) pushed to Micatob/Athena master.
+
+---
+
+# CI Unblock Session - 2026-10-17
+
+## Summary
+Took the GitHub Actions pipeline (Micatob/Athena) from "red since day one"
+to fully green except docker (disabled by operator).
+
+## What was done
+- Fixed 4 pre-3.12 f-string SyntaxErrors (E999) found by CI's Python 3.11
+  lint: backslash inside f-string expression parts, hoisted to variables.
+  Sites: modules/reporting.py (3 disclosure "Reproduce" lines),
+  modules/post_exploitation/persistence.py (registry reverse-shell b64).
+  Wrote AST-based scanner (FormattedValue segments) to find them - local
+  Python 3.14 (PEP 701) hides them from the local parser.
+- First-ever test-matrix run revealed 33 failures on Python 3.11:
+  aioresponses 0.7.9 + aiohttp 3.14.x cannot mock - aiohttp 3.14 added a
+  required keyword-only ClientResponse.__init__ arg (stream_writer).
+  Confirmed locally in throwaway venv (aiohttp 3.13.2+0.7.9 OK; 3.14.5
+  breaks on ANY python version - not 3.11-specific).
+- Chose the CVE-clean path: aiohttp>=3.14.0 pinned in requirements
+  (3.13.x carries 12+ PYSEC-2026 advisories, fixed only in 3.14.0+;
+  a security scanner cannot ship known-vuln http stack) + test-only shim
+  in tests/conftest.py that injects a null stream_writer into
+  ClientResponse.__init__ when aioresponses omits it. Remove when
+  aioresponses ships an upstream fix.
+- Fixed env-dependent nuclei launch-marker test (test_external_tools.py):
+  now hermetic (mocks _templates_present); tool_bridge template-failure
+  message now carries the contract's install/re-run marker.
+- Fixed GHCR tag (must be lowercase): ghcr.io/micatob/athena.
+- Docker job: DISABLED (commented block in ci.yml with re-enable notes)
+  per operator - will re-enable on his word.
+
+## Verification
+- Local full suite on the exact CI stack (aiohttp 3.14.5 +
+  aioresponses 0.7.9 + shim): 1072 passed, 1 skipped.
+- CI run 39050401284 (a176547): lint OK, security OK (bandit baseline
+  gate + pip-audit clean), test 3.10 OK / 3.11 OK / 3.12 OK.
+- flake8 E302 fixed post-run; docker tag fixed after.
+
+## Git
+- Pushed this session: cbd6690, 1418f51, cc35b07, 36de4bb, e3ab38c,
+  a176547, ea8007d + this docker-disable commit. All on Micatob/Athena
+  master.
