@@ -377,7 +377,7 @@ async def run_nuclei(target: str,
             return _unavailable(
                 tool, binary,
                 'nuclei templates missing and auto-update failed; '
-                'run: nuclei -update-templates')
+                'install templates then re-run: nuclei -update-templates')
 
     # Rate-limited by default: an unthrottled template run trips the target's
     # WAF mid-scan and silently returns zero matches (observed 2026-10-06).

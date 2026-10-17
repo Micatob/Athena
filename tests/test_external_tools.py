@@ -575,6 +575,9 @@ def test_launch_markers_shared_across_tools(monkeypatch):
     monkeypatch.setattr(tb, 'find_binary',
                         lambda name, extra_dirs=(): '/opt/tool')
     monkeypatch.setattr(tb, '_run_process', _broken)
+    # Host-independent: don't let a missing template repo divert nuclei into
+    # the auto-update path before the (mocked) broken launch is reached.
+    monkeypatch.setattr(tb, '_templates_present', lambda: True)
     for runner, arg in ((tb.run_dalfox, 'https://t.example/'),
                         (tb.run_wafw00f, 'https://t.example/'),
                         (tb.run_httpx, 'https://t.example/'),
