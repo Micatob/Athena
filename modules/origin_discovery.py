@@ -72,7 +72,10 @@ async def origin_discover(target: str, apex_scoped: bool = True) -> Dict[str, An
                     front_server = r.headers.get("Server", "")
             except Exception:
                 front_body, front_server = "", ""
-            front_hash = hashlib.md5(front_body[:4000].encode(errors="ignore")).hexdigest()
+            # Body fingerprint for origin comparison only - not a security
+            # decision; usedforsecurity=False keeps bandit (B324) honest.
+            front_hash = hashlib.md5(front_body[:4000].encode(errors="ignore"),
+                                     usedforsecurity=False).hexdigest()
             for ip in candidates:
                 # fail-closed: never probe private/loopback or current resolution
                 if _is_private_ip(ip):

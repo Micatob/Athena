@@ -1,0 +1,345 @@
+LOW|athena.py|B105|Possible hardcoded password: ''
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B110|Try, Except, Pass detected.
+LOW|athena.py|B112|Try, Except, Continue detected.
+LOW|athena.py|B112|Try, Except, Continue detected.
+LOW|athena.py|B112|Try, Except, Continue detected.
+LOW|modules/ai_integration.py|B110|Try, Except, Pass detected.
+LOW|modules/ai_integration.py|B110|Try, Except, Pass detected.
+LOW|modules/ai_integration.py|B110|Try, Except, Pass detected.
+LOW|modules/ai_integration.py|B110|Try, Except, Pass detected.
+LOW|modules/auth_session.py|B110|Try, Except, Pass detected.
+LOW|modules/auth_session.py|B110|Try, Except, Pass detected.
+LOW|modules/auth_session.py|B112|Try, Except, Continue detected.
+LOW|modules/console.py|B110|Try, Except, Pass detected.
+LOW|modules/cve_mapper.py|B110|Try, Except, Pass detected.
+LOW|modules/cve_mapper.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/discovery.py|B112|Try, Except, Continue detected.
+LOW|modules/discovery.py|B112|Try, Except, Continue detected.
+LOW|modules/discovery.py|B112|Try, Except, Continue detected.
+LOW|modules/discovery.py|B112|Try, Except, Continue detected.
+LOW|modules/discovery.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B112|Try, Except, Continue detected.
+LOW|modules/exploitation.py|B404|Consider possible security implications associated with the subprocess module.
+LOW|modules/exploitation_runner.py|B110|Try, Except, Pass detected.
+LOW|modules/exploitation_runner.py|B110|Try, Except, Pass detected.
+LOW|modules/graph_lite.py|B110|Try, Except, Pass detected.
+LOW|modules/graph_lite.py|B110|Try, Except, Pass detected.
+LOW|modules/graph_lite.py|B112|Try, Except, Continue detected.
+LOW|modules/graphql_sec.py|B112|Try, Except, Continue detected.
+LOW|modules/graphql_sec.py|B112|Try, Except, Continue detected.
+LOW|modules/graphql_sec.py|B112|Try, Except, Continue detected.
+LOW|modules/graphql_sec.py|B112|Try, Except, Continue detected.
+LOW|modules/hard_guardrail.py|B110|Try, Except, Pass detected.
+LOW|modules/headless_crawl.py|B110|Try, Except, Pass detected.
+LOW|modules/headless_crawl.py|B110|Try, Except, Pass detected.
+LOW|modules/headless_crawl.py|B112|Try, Except, Continue detected.
+LOW|modules/hidden_asset_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/hidden_asset_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/hidden_asset_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/hidden_asset_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/hidden_asset_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/hidden_asset_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/js_recon.py|B112|Try, Except, Continue detected.
+LOW|modules/kev.py|B110|Try, Except, Pass detected.
+LOW|modules/kev.py|B110|Try, Except, Pass detected.
+LOW|modules/operation_control.py|B110|Try, Except, Pass detected.
+LOW|modules/operation_control.py|B110|Try, Except, Pass detected.
+LOW|modules/operation_control.py|B110|Try, Except, Pass detected.
+LOW|modules/origin_discovery.py|B110|Try, Except, Pass detected.
+LOW|modules/origin_discovery.py|B112|Try, Except, Continue detected.
+LOW|modules/post_exploitation/data_collection.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/enumeration.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/foothold.py|B112|Try, Except, Continue detected.
+LOW|modules/post_exploitation/orchestrator.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/orchestrator.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/orchestrator.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/orchestrator.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/persistence.py|B112|Try, Except, Continue detected.
+LOW|modules/post_exploitation/persistence.py|B112|Try, Except, Continue detected.
+LOW|modules/post_exploitation/privesc.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/privesc.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/privesc.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/privesc.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B107|Possible hardcoded password: ''
+LOW|modules/post_exploitation/session.py|B107|Possible hardcoded password: ''
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/post_exploitation/session.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B105|Possible hardcoded password: ''
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/protocol_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/protocol_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/recon_orchestrator.py|B110|Try, Except, Pass detected.
+LOW|modules/reporting.py|B405|Using xml.etree.ElementTree to parse untrusted XML data is known to be vulnerable to XML attacks. Replace xml.etree.ElementTree with the equivalent defusedxml package, or make sure defusedxml.defuse_stdlib() is called.
+LOW|modules/scan_store.py|B110|Try, Except, Pass detected.
+LOW|modules/serialized_scan.py|B110|Try, Except, Pass detected.
+LOW|modules/serialized_scan.py|B112|Try, Except, Continue detected.
+LOW|modules/settings_registry.py|B110|Try, Except, Pass detected.
+LOW|modules/subdomain_takeover.py|B110|Try, Except, Pass detected.
+LOW|modules/supply_chain_recon.py|B110|Try, Except, Pass detected.
+LOW|modules/tls_scan.py|B110|Try, Except, Pass detected.
+LOW|modules/tool_bridge.py|B110|Try, Except, Pass detected.
+LOW|modules/tool_bridge.py|B110|Try, Except, Pass detected.
+LOW|modules/tool_bridge.py|B110|Try, Except, Pass detected.
+LOW|modules/tool_bridge.py|B110|Try, Except, Pass detected.
+LOW|modules/tool_bridge.py|B110|Try, Except, Pass detected.
+LOW|modules/tool_bridge.py|B110|Try, Except, Pass detected.
+LOW|modules/tool_bridge.py|B112|Try, Except, Continue detected.
+LOW|modules/tool_bridge.py|B112|Try, Except, Continue detected.
+LOW|modules/tool_bridge.py|B112|Try, Except, Continue detected.
+LOW|modules/tool_bridge.py|B112|Try, Except, Continue detected.
+LOW|modules/verification/oob.py|B110|Try, Except, Pass detected.
+LOW|modules/verification/oob.py|B110|Try, Except, Pass detected.
+LOW|modules/verification/oob.py|B110|Try, Except, Pass detected.
+LOW|modules/verification/oob.py|B110|Try, Except, Pass detected.
+LOW|modules/verification/oob.py|B110|Try, Except, Pass detected.
+LOW|modules/verification/oob.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B110|Try, Except, Pass detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/vulnerability_scanner.py|B112|Try, Except, Continue detected.
+LOW|modules/waf_detector.py|B110|Try, Except, Pass detected.
+MEDIUM|athena.py|B104|Possible binding to all interfaces.
+MEDIUM|athena.py|B104|Possible binding to all interfaces.
+MEDIUM|athena.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/advanced_exploitation.py|B608|Possible SQL injection vector through string-based query construction.
+MEDIUM|modules/cve_mapper.py|B310|Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.
+MEDIUM|modules/cve_mapper.py|B310|Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.
+MEDIUM|modules/discovery.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/discovery.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/discovery.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/discovery.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/discovery.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/discovery.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/discovery.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/hidden_asset_scanner.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/hidden_asset_scanner.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/hidden_asset_scanner.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/kev.py|B310|Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.
+MEDIUM|modules/post_exploitation/assessment.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/post_exploitation/assessment.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/cleanup.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/data_collection.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/data_collection.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/foothold.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/post_exploitation/orchestrator.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/post_exploitation/persistence.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/persistence.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/persistence.py|B608|Possible SQL injection vector through string-based query construction.
+MEDIUM|modules/post_exploitation/privesc.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/post_exploitation/session.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/post_exploitation/session.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/post_exploitation/session.py|B104|Possible binding to all interfaces.
+MEDIUM|modules/reporting.py|B310|Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.
+MEDIUM|modules/vulnerability_scanner.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/vulnerability_scanner.py|B108|Probable insecure usage of temp file/directory.
+MEDIUM|modules/vulnerability_scanner.py|B608|Possible SQL injection vector through string-based query construction.

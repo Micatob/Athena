@@ -1016,7 +1016,11 @@ def _build_pg_password(salt: bytes, password: str) -> bytes:
     if not password:
         empty = b''
         return struct.pack('!I', 4 + len(empty)) + b'p' + empty
-    md5_hash = hashlib.md5(password.encode() + salt[:4]).hexdigest().encode()
+    # PostgreSQL's protocol REQUIRES MD5 here (md5 response format); this is
+    # protocol compliance, not a security decision - usedforsecurity=False
+    # marks it as such (bandit B324).
+    md5_hash = hashlib.md5(password.encode() + salt[:4],
+                           usedforsecurity=False).hexdigest().encode()
     md5_resp = b'md5' + md5_hash
     return struct.pack('!I', 4 + len(md5_resp)) + b'p' + md5_resp
 

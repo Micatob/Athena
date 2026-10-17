@@ -1148,3 +1148,50 @@ Operator's live scan (ogitech.edu.ng) showed three failures at once:
   new `_CALL_FAILURES` global - no F/E9 errors introduced).
 - Session state updated + committed; pushed per operator instruction
   (live rescan proof on the two scan targets still open).
+
+---
+
+# Athena Session - 2026-10-17 (CI unblocked, pushed)
+
+## Why CI was never green
+- ci.yml lint ran zero-tolerance flake8 on a repo with 1095 pre-existing
+  violations (exit 1); security ran bandit (exit 1 on any finding) and
+  pip-audit --service-url (flag removed in pip-audit 2.x - instant exit 2).
+  lint+security red => 	est job (needs both) NEVER ran on GitHub, so the
+  3-Python matrix + coverage + docker publish were dead weight. Sessions
+  only ever measured "0 NEW violations vs baseline" - never CI itself.
+
+## Fix (per operator: skip API keys + docker, just unblock CI)
+- NEW scripts/check_ci_baseline.py - baseline gate for flake8 and bandit:
+  snapshots known findings (digits in messages masked, paths normalized
+  /-separated so Windows-generated baselines match Linux runners, counts
+  compared so extra copies ARE new). flake8 = any new finding blocks;
+  bandit = new HIGH/UNDEFINED block, new medium/low warn (codebase grows
+  B104/B110 notes legitimately).
+- Baselines committed: .github/flake8-baseline.txt (1172 entries covering
+  athena.py + modules/ + tests/), .github/bandit-baseline.txt (345).
+- ci.yml: lint/security jobs capture findings (|| true) then gate via
+  the checker; pip-audit fixed to pip-audit -r requirements.txt (verified
+  locally: "No known vulnerabilities found"); bandit pinned to 1.9.4 to
+  match baseline generation; lint scope widened to tests/; jobs no longer
+  pip-install the full requirements (flake8/bandit don't need it - faster).
+- Real fix under the gate: both HIGH B324 md5 findings resolved with
+  usedforsecurity=False (origin_discovery body fingerprint, protocol_scanner
+  PostgreSQL md5 auth response - both non-security protocol/comparison uses).
+  Bandit now reports 0 HIGH.
+- Docker job untouched (operator: leave docker).
+
+## Verification
+- flake8 check vs baseline: exit 0 (1095 source + 77 test entries).
+- bandit check vs baseline: exit 0, HIGHs left: 0.
+- pip-audit -r requirements.txt: no known vulnerabilities.
+- pytest tests/test_external_tools.py test_tool_bridge.py test_config.py:
+  135 passed (post-md5-edit).
+- Full suite was 1072 passed/1 skipped earlier today (pre-md5-edit; edits
+  are kwarg-only on two call sites, bandit re-parses both files clean).
+- Docker pre-run attempt failed (Docker Desktop engine not running) - Linux
+  validation deferred to the CI run itself; operator opted to skip docker.
+
+## Git
+- Previous commit this session: 20c036c (OpenRouter failover +
+  disclosure verification) pushed to Micatob/Athena master.
