@@ -50,11 +50,12 @@ class AICorrelationType(Enum):
 
 
 class AIProvider(Enum):
-    """Supported LLM backends.  Gemini and Groq are OpenAI-compatible in
-    shape; DeepSeek is OpenAI-compatible as well (that key was previously
+    """Supported LLM backends.  Gemini has its own shape; Groq, DeepSeek
+    and OpenRouter are OpenAI-compatible (DeepSeek's key was previously
     read but never used - the call was hardcoded to Gemini)."""
     GEMINI = "gemini"
     GROQ = "groq"
+    OPENROUTER = "openrouter"
     DEEPSEEK = "deepseek"
 
 
@@ -84,11 +85,29 @@ AI_PROVIDERS = {
         "endpoint": "https://api.deepseek.com/chat/completions",
         "style": "openai",
     },
+    AIProvider.OPENROUTER: {
+        "env": "OPENROUTER_API_KEY",
+        # Same default family as the Groq backend so failover keeps
+        # behaviour consistent; override per-provider with
+        # ATHENA_AI_MODEL_OPENROUTER (any OpenRouter model id works,
+        # e.g. anthropic/claude-haiku-4.5 or deepseek/deepseek-chat).
+        "model": "openai/gpt-oss-120b",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "style": "openai",
+        # OpenRouter asks integrations to identify themselves; harmless
+        # extra headers, merged into the OpenAI-style POST below.
+        "headers": {
+            "HTTP-Referer": "https://github.com/Micatob/Athena",
+            "X-Title": "Athena",
+        },
+    },
 }
 
-#: Probe order when ``ATHENA_AI_PROVIDER`` is not set.
+#: Probe order when ``ATHENA_AI_PROVIDER`` is not set.  OpenRouter sits
+#: right behind Groq so it is the first fallback when Gemini/Groq fail.
 PROVIDER_PRIORITY: List[AIProvider] = [
-    AIProvider.GEMINI, AIProvider.GROQ, AIProvider.DEEPSEEK,
+    AIProvider.GEMINI, AIProvider.GROQ,
+    AIProvider.OPENROUTER, AIProvider.DEEPSEEK,
 ]
 
 
@@ -254,10 +273,34 @@ def resolve_model(provider: AIProvider, explicit: str = "") -> str:
 #: those failures and the CLI would never print its "AI degraded" notice.
 _CALL_FAILURES = 0
 
+#: Same counter broken down per provider value (e.g. {"groq": 4}).
+#: Read via ``provider_call_failures_by()`` for the degraded notice so the
+#: operator sees *which* backend failed, not just a total.
+_CALL_FAILURES_BY: Dict[str, int] = {}
+
 
 def provider_call_failures() -> int:
     """Total provider calls in this process that gave up after retries."""
     return _CALL_FAILURES
+
+
+def provider_call_failures_by() -> Dict[str, int]:
+    """Per-provider failure counts (copy; never raises)."""
+    try:
+        return dict(_CALL_FAILURES_BY)
+    except Exception:
+        return {}
+
+
+def _note_provider_failure(provider: AIProvider) -> None:
+    """Bump the total and per-provider failure counters together."""
+    global _CALL_FAILURES
+    _CALL_FAILURES += 1
+    try:
+        key = provider.value if isinstance(provider, AIProvider) else str(provider)
+        _CALL_FAILURES_BY[key] = _CALL_FAILURES_BY.get(key, 0) + 1
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +713,8 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
 
         If the primary provider fails (network error, HTTP error, missing
         key), the call falls through to the next configured provider
-        (Gemini → Groq → DeepSeek).  ``last_provider`` reports who answered.
+        (Gemini → Groq → OpenRouter → DeepSeek).  ``last_provider`` reports
+        who answered.
         """
         if not self._enabled:
             return None
@@ -744,7 +788,7 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                 if _is_connectivity_error(e):
                     _note_connectivity_failure(self.logger)
                     self.call_failures += 1
-                    _CALL_FAILURES += 1
+                    _note_provider_failure(provider)
                     return None
                 status = _status_code(e)
                 if status == 429:
@@ -760,7 +804,7 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
                     else:
                         self.logger.debug(f"LLM call failed ({provider.value}) #{_CALL_FAILURES+1}: {e}")
                     self.call_failures += 1
-                    _CALL_FAILURES += 1
+                    _note_provider_failure(provider)
                     return None
                 delay = _retry_delay(e, attempt)
                 self.logger.info(
@@ -778,13 +822,18 @@ The word "minor" must NOT appear. exploitation_command must be copy-paste ready.
         import httpx
 
         if config["style"] == "openai":
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            try:
+                headers.update(config.get("headers") or {})
+            except Exception:
+                pass
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     config["endpoint"],
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                     json={
                         "model": self._model_for(provider),
                         "messages": [{"role": "user",
@@ -2072,7 +2121,8 @@ def create_ai_integration(api_key: str = "", model: str = "") -> AIIntegration:
     """Create an AI integration instance.
 
     Provider is resolved from ``ATHENA_AI_PROVIDER``, then from whichever
-    key is configured (GEMINI → GROQ → DEEPSEEK).  An explicitly passed
-    ``api_key`` defaults to the Gemini backend for backwards compatibility.
+    key is configured (GEMINI → GROQ → OPENROUTER → DEEPSEEK).  An
+    explicitly passed ``api_key`` defaults to the Gemini backend for
+    backwards compatibility.
     """
     return AIIntegration(api_key=api_key, model=model)

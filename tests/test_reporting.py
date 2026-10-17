@@ -201,6 +201,20 @@ class TestHtmlConsolidation:
         assert "AI Advisory Notes" in html
         assert "Advisory only" in html
 
+    def test_flagged_fp_list_not_rendered_in_html(self, html):
+        # Operator rule: what the terminal hides, the HTML hides too.
+        # The FP reason below exists ONLY in the flagged list, never in a
+        # real finding description, so its absence proves the table is gone.
+        assert "generic 200 response" not in html
+        assert "flagged as likely false positives" in html
+
+    def test_flagged_fp_audit_survives_in_json(self):
+        audit = ReportGenerator().generate_comprehensive_report(
+            _results())["athena_security_audit"]
+        assert audit["ai_assistant"]["findings_suggested_as_false_positive"] == 1
+        assert audit["ai_assistant"]["false_positive_details"][0]["url"] == \
+            "https://target.example/page0"
+
     def test_truncation_banner_rendered(self, html):
         assert "Findings itemization capped" in html
 
@@ -258,6 +272,32 @@ class TestRunAIAnalysisConsolidation:
         assert "Validating 3 consolidated findings (from 6 raw detections)" in out
         assert "Consolidated 2 duplicate group(s)" in out
         assert "duplicate(s) of finding: unknown" not in out
+
+    @pytest.mark.asyncio
+    async def test_ai_header_shows_provider_chain(self, monkeypatch, capsys):
+        import athena
+
+        for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
+                      "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        # Hermetic: ignore the operator's real .env keys.
+        monkeypatch.setattr("modules.ai_integration._dotenv_values",
+                            lambda: {})
+        monkeypatch.setenv("ATHENA_AI_PROVIDER", "groq")
+        monkeypatch.setenv("GROQ_API_KEY", "test-key")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-or-key")
+
+        async def fake_call_llm(self, prompt, temperature=0.3):
+            return None
+
+        from modules.ai_integration import AIIntegration
+        monkeypatch.setattr(AIIntegration, "_call_llm", fake_call_llm)
+        await athena.run_ai_analysis(
+            "https://t", {"urls": ["https://t/"]},
+            [{"type": "XSS", "url": "https://t/a", "severity": "HIGH"}],
+            {"mode": "full"})
+        out = capsys.readouterr().out
+        assert "AI provider chain: groq -> openrouter" in out
 
 
 class TestReportHardening:

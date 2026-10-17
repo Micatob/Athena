@@ -2079,25 +2079,31 @@ def _generate_html_report(report: Dict[str, Any]) -> str:
         _cons = ai.get('consolidation') or {}
         if not isinstance(_cons, dict):
             _cons = {}
-        fp_rows = ''.join(
-            f"<tr><td>{html.escape(str(f.get('type', '')))}</td>"
-            f"<td><code>{html.escape(str(f.get('url', '')))}</code></td>"
-            f"<td>{html.escape(str(f.get('reason', ''))[:200])}</td>"
-            f"<td>{f.get('confidence', '')}</td></tr>"
-            for f in (ai.get('false_positive_details') or [])[:20] if isinstance(f, dict)
-        )
+        try:
+            _fp_count = len(ai.get('false_positive_details') or [])
+        except Exception:
+            _fp_count = 0
+        # Operator rule: what the terminal hides, the HTML hides too.  The
+        # flagged items never render as findings here - JSON keeps the full
+        # audit trail (`false_positive_details`), this page only counts them.
+        _fp_line = (f'<p><em>{_fp_count} finding(s) flagged as likely false '
+                    f'positives - excluded from this report. Full list with '
+                    f'AI reasons lives in the JSON report.</em></p>'
+                    if _fp_count else
+                    '<p><em>No false-positive hypotheses raised.</em></p>')
         ai_section = f"""
     <h2>AI Advisory Notes</h2>
     <p>Provider: <code>{html.escape(str(ai.get('provider', '')))}</code>
        / <code>{html.escape(str(ai.get('model', '')))}</code>.
-       <strong>Advisory only</strong> - the model flags suspected false
-       positives for review; flagged findings are excluded from active
-       testing/exploitation but never deleted (see the table below).
-       Deterministic validation remains authoritative.
-        Statements: {ai.get('statement_count', 0)}.
-        Consolidated {_cons.get('raw_findings', 0)} raw detections into
-        {_cons.get('unique_findings', 0)} unique findings.</p>
-    {'<table><thead><tr><th>Type</th><th>URL</th><th>AI reason</th><th>Conf.</th></tr></thead><tbody>' + fp_rows + '</tbody></table>' if fp_rows else '<p><em>No false-positive hypotheses raised.</em></p>'}"""
+        <strong>Advisory only</strong> - the model flags suspected false
+        positives for review; flagged findings are excluded from active
+        testing/exploitation and from this report's findings, but never
+        deleted (see the JSON report).
+        Deterministic validation remains authoritative.
+         Statements: {ai.get('statement_count', 0)}.
+         Consolidated {_cons.get('raw_findings', 0)} raw detections into
+         {_cons.get('unique_findings', 0)} unique findings.</p>
+    {_fp_line}"""
 
     exploit_section = ''
     attempts = [a for a in (audit.get('exploitation_attempts') or []) if isinstance(a, dict)]
@@ -2337,21 +2343,30 @@ def ai_filter_notice(original: int, kept: int, filtered: int) -> str:
     """Console line saying exactly what AI triage did to the finding set."""
     return (f"  [*] AI triage: {filtered} finding(s) flagged as likely false "
             f"positives ({original} -> {kept} kept); excluded from active "
-            "testing, exploitation and attack-path analysis - full list "
-            "retained in the report")
+            "testing, exploitation, attack-path analysis and the HTML "
+            "report - full list retained in the report (JSON audit trail)")
 
 
-def ai_degraded_notice(failures: int) -> str:
+def ai_degraded_notice(failures: int, by: Dict[str, Any] = None) -> str:
     """Console line for partial provider failures (404, rate limit, ...)."""
-    return (f"  [!] AI degraded: {failures} provider call(s) failed; "
+    line = (f"  [!] AI degraded: {failures} provider call(s) failed; "
             "deterministic validation remains authoritative")
+    try:
+        parts = [f"{k}: {int(v)}" for k, v in (by or {}).items()
+                 if isinstance(v, (int, float)) and int(v) > 0]
+    except Exception:
+        parts = []
+    if parts:
+        line += f" (failed calls by provider - {', '.join(parts)})"
+    return line
 
 
 def print_ai_degraded(ai_analysis: Dict[str, Any]) -> int:
     """Emit the AI-degraded notice for an analysis run; returns the count."""
     failures = int((ai_analysis or {}).get("provider_call_failures") or 0)
     if failures:
-        cprint(ai_degraded_notice(failures))
+        cprint(ai_degraded_notice(
+            failures, (ai_analysis or {}).get("provider_failures_by")))
     return failures
 
 
@@ -2359,7 +2374,8 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
                           vulnerabilities: List[Dict[str, Any]],
                           context: Optional[Dict[str, Any]] = None
                           ) -> Dict[str, Any]:
-    """Optional AI-assisted analysis of scan results (Gemini / Groq / DeepSeek).
+    """Optional AI-assisted analysis of scan results
+    (Gemini / Groq / OpenRouter / DeepSeek).
 
     Deterministic tools stay authoritative: AI output is advisory only
     (FACT / INFERENCE / HYPOTHESIS / RECOMMENDATION statements) and never
@@ -2369,12 +2385,14 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
     """
     from modules.ai_integration import (AIIntegration, configured_providers,
                                         ensemble_triage,
-                                        provider_call_failures)
+                                        provider_call_failures,
+                                        provider_call_failures_by)
 
     engine = AIIntegration()
     if not engine.enabled:
         return {}
     failures_seen = provider_call_failures()
+    failures_by_seen = provider_call_failures_by()
 
     # A single None upstream (failed merge) must never kill AI triage
     # with AttributeError — same crash class as the reporting dedup fix.
@@ -2389,6 +2407,13 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
         for i, v in enumerate(_clean_vulns)
     ]
     cprint(f"\n  [*] AI-assisted analysis ({engine.provider.value}:{engine.model}) ...")
+    try:
+        _chain = [p.value for p in configured_providers()]
+    except Exception:
+        _chain = []
+    if len(_chain) > 1:
+        cprint(f"  [*] AI provider chain: {' -> '.join(_chain)} "
+               f"(automatic failover in order)")
 
     # Consolidate identical detections (same type + URL) before any LLM call:
     # a full scan emits thousands of raw rows for a handful of distinct
@@ -2459,7 +2484,8 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
             fp_count += 1
         if fp_count:
             cprint(f"  [*] AI validation flagged {fp_count} finding(s) as likely "
-                   f"false positives - hidden from terminal, full list in the report")
+                   f"false positives - hidden from terminal and the HTML "
+                   f"report, full list in the JSON report")
         ai_analysis["validated_findings"] = [
             s.to_dict() for s in validated.statements
         ]
@@ -2514,6 +2540,14 @@ async def run_ai_analysis(target: str, discovery: Dict[str, Any],
     # ensemble_triage) contributes to the process-wide failure counter.
     ai_analysis["provider_call_failures"] = max(
         0, provider_call_failures() - failures_seen)
+    try:
+        _by_now = provider_call_failures_by()
+        ai_analysis["provider_failures_by"] = {
+            k: max(0, int(v) - int(failures_by_seen.get(k, 0)))
+            for k, v in _by_now.items()
+            if int(v) - int(failures_by_seen.get(k, 0)) > 0}
+    except Exception:
+        ai_analysis["provider_failures_by"] = {}
     return ai_analysis
 
 

@@ -250,7 +250,7 @@ class TestLLMPayloadRedaction:
 class TestProviderResolution:
     def test_explicit_key_defaults_to_gemini(self, monkeypatch):
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
-                     "ATHENA_AI_PROVIDER"):
+                      "OPENROUTER_API_KEY", "ATHENA_AI_PROVIDER"):
             monkeypatch.delenv(name, raising=False)
         assert resolve_provider("some-key") == AIProvider.GEMINI
 
@@ -263,16 +263,37 @@ class TestProviderResolution:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setenv("GROQ_API_KEY", "g")
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert resolve_provider() == AIProvider.GROQ
 
     def test_no_keys_falls_back_to_gemini(self, monkeypatch):
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
-                     "ATHENA_AI_PROVIDER"):
+                      "OPENROUTER_API_KEY", "ATHENA_AI_PROVIDER"):
             monkeypatch.delenv(name, raising=False)
         # Hermetic: ignore real .env file keys (operator machine may have them)
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert resolve_provider() == AIProvider.GEMINI
+
+    def test_failure_counters_track_total_and_per_provider(self, monkeypatch):
+        from modules import ai_integration as ai_mod
+        old, old_by = ai_mod._CALL_FAILURES, dict(ai_mod._CALL_FAILURES_BY)
+        ai_mod._CALL_FAILURES = 0
+        ai_mod._CALL_FAILURES_BY.clear()
+        try:
+            ai_mod._note_provider_failure(AIProvider.GROQ)
+            ai_mod._note_provider_failure(AIProvider.GROQ)
+            ai_mod._note_provider_failure(AIProvider.GEMINI)
+            assert ai_mod.provider_call_failures() == 3
+            assert ai_mod.provider_call_failures_by() == {
+                'groq': 2, 'gemini': 1}
+            # Copy semantics: mutating the return must not move the counter.
+            ai_mod.provider_call_failures_by()['groq'] = 99
+            assert ai_mod.provider_call_failures_by()['groq'] == 2
+        finally:
+            ai_mod._CALL_FAILURES = old
+            ai_mod._CALL_FAILURES_BY.clear()
+            ai_mod._CALL_FAILURES_BY.update(old_by)
 
     def test_default_models_per_provider(self, monkeypatch):
         from modules.ai_integration import _dotenv_refresh
@@ -280,12 +301,15 @@ class TestProviderResolution:
         # Suppress the .env fallback so we can assert each provider's own default
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
-                     "DEEPSEEK_API_KEY", "ATHENA_AI_MODEL"):
+                     "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
+                     "ATHENA_AI_MODEL"):
             monkeypatch.delenv(name, raising=False)
         groq = AIIntegration(provider=AIProvider.GROQ, api_key="k")
         assert groq.model == "openai/gpt-oss-120b"
         deepseek = AIIntegration(provider=AIProvider.DEEPSEEK, api_key="k")
         assert deepseek.model == "deepseek-chat"
+        openrouter = AIIntegration(provider=AIProvider.OPENROUTER, api_key="k")
+        assert openrouter.model == "openai/gpt-oss-120b"
         gemini = AIIntegration(api_key="k")
         assert gemini.model == "gemini-flash-latest"
 
@@ -298,6 +322,7 @@ class TestProviderResolution:
     def test_configured_providers_reflects_env(self, monkeypatch):
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setenv("GROQ_API_KEY", "g")
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert configured_providers() == [AIProvider.GROQ]
@@ -338,7 +363,7 @@ class TestLLMTransport:
     @pytest.mark.asyncio
     async def test_gemini_dispatch(self, monkeypatch):
         for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
-                     "DEEPSEEK_API_KEY"):
+                     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         captured = {}
         monkeypatch.setattr(
@@ -385,6 +410,48 @@ class TestLLMTransport:
         assert captured["url"].startswith("https://api.deepseek.com")
 
     @pytest.mark.asyncio
+    async def test_openrouter_openai_dispatch(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            "httpx.AsyncClient",
+            lambda: _FakeAsyncClient(captured, {
+                "choices": [{"message": {"content": "or-answer"}}]
+            }),
+        )
+        engine = AIIntegration(provider=AIProvider.OPENROUTER, api_key="or-key")
+        assert await engine._call_llm("q") == "or-answer"
+        assert captured["url"] == (
+            "https://openrouter.ai/api/v1/chat/completions")
+        assert captured["headers"]["Authorization"] == "Bearer or-key"
+        assert captured["json"]["model"] == "openai/gpt-oss-120b"
+        assert captured["json"]["messages"][0]["content"] == "q"
+
+    @pytest.mark.asyncio
+    async def test_failover_reaches_openrouter_after_groq(self, monkeypatch):
+        for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
+                     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        # Hermetic: the real .env carries a Gemini key, which would answer
+        # the failover first and hide the Groq -> OpenRouter hop.
+        monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
+        monkeypatch.setenv("GROQ_API_KEY", "gr")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+        engine = AIIntegration(provider=AIProvider.GROQ, api_key="gr")
+
+        calls = []
+
+        async def fake(provider, prompt, temperature):
+            calls.append(provider)
+            if provider == AIProvider.GROQ:
+                return None
+            return "from-openrouter"
+
+        monkeypatch.setattr(engine, "_call_llm_provider", fake)
+        assert await engine._call_llm("q") == "from-openrouter"
+        assert calls == [AIProvider.GROQ, AIProvider.OPENROUTER]
+        assert engine.last_provider == AIProvider.OPENROUTER
+
+    @pytest.mark.asyncio
     async def test_disabled_engine_never_calls(self, monkeypatch):
         from modules.ai_integration import _dotenv_refresh
         _dotenv_refresh()
@@ -396,7 +463,7 @@ class TestLLMTransport:
         # configured" path: suppress the file fallback for this assertion.
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
-                     "DEEPSEEK_API_KEY"):
+                     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         engine = AIIntegration(api_key="")
         assert not engine.enabled
@@ -407,7 +474,7 @@ class TestLLMFailover:
     @pytest.mark.asyncio
     async def test_primary_answers_without_failover(self, monkeypatch):
         for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
-                     "DEEPSEEK_API_KEY"):
+                     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("GEMINI_API_KEY", "g")
         monkeypatch.setenv("GROQ_API_KEY", "gr")
@@ -427,7 +494,7 @@ class TestLLMFailover:
     @pytest.mark.asyncio
     async def test_failover_to_next_configured_provider(self, monkeypatch):
         for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
-                     "DEEPSEEK_API_KEY"):
+                     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("GEMINI_API_KEY", "g")
         monkeypatch.setenv("GROQ_API_KEY", "gr")
@@ -449,7 +516,7 @@ class TestLLMFailover:
     @pytest.mark.asyncio
     async def test_all_providers_fail_returns_none(self, monkeypatch):
         for name in ("ATHENA_AI_PROVIDER", "GEMINI_API_KEY", "GROQ_API_KEY",
-                     "DEEPSEEK_API_KEY"):
+                     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("GEMINI_API_KEY", "g")
         monkeypatch.setenv("GROQ_API_KEY", "gr")
@@ -467,7 +534,8 @@ class TestLLMFailover:
     async def test_transport_error_triggers_failover(self, monkeypatch):
         import httpx
 
-        for name in ("ATHENA_AI_PROVIDER", "GROQ_API_KEY", "DEEPSEEK_API_KEY"):
+        for name in ("ATHENA_AI_PROVIDER", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
+                      "OPENROUTER_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
         monkeypatch.setenv("GROQ_API_KEY", "groq-key")
@@ -548,7 +616,8 @@ class TestFalsePositiveTriage:
     async def test_disabled_returns_empty(self, monkeypatch):
         from modules.ai_integration import _dotenv_refresh, _dotenv_values
         _dotenv_refresh()
-        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY"):
+        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
+                      "OPENROUTER_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         # .env may provide keys; suppress the dotenv fallback for this test
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
@@ -579,7 +648,8 @@ class TestReconAnalysis:
 class TestEnsembleTriage:
     @pytest.mark.asyncio
     async def test_no_keys_returns_empty(self, monkeypatch):
-        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY"):
+        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
+                      "OPENROUTER_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         assert await ensemble_triage([{"id": "1"}]) == []
@@ -589,6 +659,7 @@ class TestEnsembleTriage:
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
         monkeypatch.setenv("GEMINI_API_KEY", "g-key")
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
         async def fake_triage(self, findings, evidence=None):
@@ -772,7 +843,8 @@ class TestValidateFindings:
         from modules.ai_integration import _dotenv_refresh
         _dotenv_refresh()
         monkeypatch.setattr("modules.ai_integration._dotenv_values", lambda: {})
-        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY"):
+        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
+                      "OPENROUTER_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         engine = AIIntegration(api_key="")
         assert await engine.validate_findings([{"id": "1"}]) is None
@@ -825,9 +897,13 @@ class TestConnectivityFastPath:
     def _clean_counters(self):
         from modules import ai_integration as ai_mod
         old = ai_mod._CALL_FAILURES
+        old_by = dict(ai_mod._CALL_FAILURES_BY)
         ai_mod._CALL_FAILURES = 0
+        ai_mod._CALL_FAILURES_BY.clear()
         yield
         ai_mod._CALL_FAILURES = old
+        ai_mod._CALL_FAILURES_BY.clear()
+        ai_mod._CALL_FAILURES_BY.update(old_by)
 
     def _providers(self, monkeypatch, *providers):
         monkeypatch.setattr(

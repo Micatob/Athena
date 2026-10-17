@@ -1090,3 +1090,61 @@ Operator's live scan (ogitech.edu.ng) showed three failures at once:
 - Pushed `415769f` (8 files, +509/-90) to `Micatob/Athena` master;
   working tree clean. Operator will pull + rescan once the PC cools down.
 - Open: live full-scan proof on ogitech (pending operator rescan).
+
+---
+
+# Athena Session - 2026-10-16 (OpenRouter failover + disclosure verification, PUSHED)
+
+## Operator asks
+1. `unverified` findings with no payloads (true phpinfo hit had URL but
+   no payload) - is that the design or a bug? Wants AI to verify +
+   payloads for all findings, production grade.
+2. Nothing was stuck: the long pytest was aborted on the operator end
+   while two scans loaded the box. Switched to targeted 1-2s test runs.
+3. Add OpenRouter with automatic switching when Gemini/Groq fail.
+
+## Answers given (honest)
+- The `unverified`-without-payload shape is the real current design,
+  not malice: scanner emitted disclosure findings with no
+  evidence/payload, the runner only verified injection types, the report
+  had no disclosure branch. AI deliberately cannot verify (downgrade-only
+  by design - an LLM "confirming" a vuln would be hallucinated proof).
+- Fix is deterministic: scanner attaches markers + curl repro,
+  `SELF_EVIDENT_TYPES` pass-through confirms proof-backed disclosures
+  with zero probes, report synthesizes a `curl` repro per row and adds
+  disclosure technique branches.
+
+## Changes (UNCOMMITTED)
+- `modules/ai_integration.py`: `AIProvider.OPENROUTER`, provider entry
+  (endpoint `openrouter.ai/api/v1`, OpenAI style, Referer/X-Title
+  headers), priority Gemini -> Groq -> OpenRouter -> DeepSeek. Existing
+  `_call_llm` loop picks it up with no extra wiring; `last_provider`
+  reports it. Default model `openai/gpt-oss-120b`, per-provider override
+  `ATHENA_AI_MODEL_OPENROUTER`.
+- `modules/exploitation_runner.py`: `SELF_EVIDENT_TYPES` (phpinfo,
+  sensitive file/disclosure, dir listing, firebase, .git, comments);
+  evidence-backed disclosures confirm without network, bare claims stay
+  inconclusive; candidate selection is now case-insensitive.
+- `modules/vulnerability_scanner.py`: phpinfo (both sites), Exposed
+  .git, Exposed Sensitive File now carry `evidence.markers` + curl
+  `payload`.
+- `modules/reporting.py`: phpinfo/sensitive/dir-listing technique
+  branches; every row backfills a `curl` repro when no detection payload.
+- `tests/test_ai_integration.py`: all hermetic key lists + dotenv mocks
+  cover `OPENROUTER_API_KEY`; new dispatch + Groq->OpenRouter failover
+  tests. NEW `tests/test_self_evident.py` (5 tests).
+- `.env` (gitignored, never committed): `OPENROUTER_API_KEY` appended.
+  `.env.example` + `README.md` document provider + failover order.
+- SECURITY: operator pasted the OR key in chat - rotate it in the
+  dashboard. Gemini/Groq values were also printed by a debug command
+  earlier in this session - rotate those too.
+
+## Verification (2026-10-17 resume)
+- Probe: OpenRouter configured + enabled from local `.env`, priority
+  order correct, per-provider model resolution correct.
+- **Full suite: 1072 passed, 1 skipped** (pre-existing skip; was 1058).
+- flake8 (CI rule) vs stashed baseline: net +7 warnings, all cosmetic
+  in touched files (F541/E501 in new reporting branches, F824 on the
+  new `_CALL_FAILURES` global - no F/E9 errors introduced).
+- Session state updated + committed; pushed per operator instruction
+  (live rescan proof on the two scan targets still open).

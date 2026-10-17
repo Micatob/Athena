@@ -65,6 +65,26 @@ class TestConsoleTruthfulness:
         assert '\n' not in athena.ai_filter_notice(30, 7, 23)
         assert '\n' not in athena.ai_degraded_notice(1)
 
+    def test_degraded_notice_breaks_down_providers(self):
+        line = athena.ai_degraded_notice(7, {'groq': 4, 'gemini': 2,
+                                             'openrouter': 1})
+        assert '[!] AI degraded: 7 provider call(s) failed' in line
+        assert 'groq: 4' in line and 'gemini: 2' in line
+        assert 'openrouter: 1' in line
+        assert '\n' not in line
+
+    def test_degraded_notice_without_breakdown_is_legacy_string(self):
+        assert athena.ai_degraded_notice(3) == (
+            '  [!] AI degraded: 3 provider call(s) failed; '
+            'deterministic validation remains authoritative')
+
+    def test_print_ai_degraded_passes_breakdown(self, capsys):
+        assert athena.print_ai_degraded(
+            {'provider_call_failures': 2,
+             'provider_failures_by': {'groq': 2}}) == 2
+        out = capsys.readouterr().out
+        assert 'groq: 2' in out
+
     def test_degraded_notice_printed_for_failed_analysis(self, capsys):
         assert athena.print_ai_degraded({'provider_call_failures': 2}) == 2
         out = capsys.readouterr().out

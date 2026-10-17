@@ -237,13 +237,14 @@ Athena can analyse findings with LLMs. Providers are configured in `.env`:
 
 ```powershell
 # .env
-ATHENA_AI_PROVIDER=groq          # gemini | groq | deepseek
+ATHENA_AI_PROVIDER=groq          # gemini | groq | openrouter | deepseek
 ATHENA_AI_MODEL=openai/gpt-oss-120b   # override model for the provider above
 GROQ_API_KEY=gsk_your_key
 GEMINI_API_KEY=your_gemini_key
+OPENROUTER_API_KEY=sk-or-v1_your_key
 ```
 
-Each provider ships its own default model (`gemini-flash-latest`, `openai/gpt-oss-120b`, `deepseek-chat`). `ATHENA_AI_MODEL` applies **only** to `ATHENA_AI_PROVIDER`'s backend - a model id for one vendor would 404 on another and silently disable failover. For a specific backend use `ATHENA_AI_MODEL_GEMINI`, `ATHENA_AI_MODEL_GROQ` or `ATHENA_AI_MODEL_DEEPSEEK`. When no key is configured every AI method returns `[]` gracefully.
+Each provider ships its own default model (`gemini-flash-latest`, `openai/gpt-oss-120b` for Groq and OpenRouter, `deepseek-chat`). `ATHENA_AI_MODEL` applies **only** to `ATHENA_AI_PROVIDER`'s backend - a model id for one vendor would 404 on another and silently disable failover. For a specific backend use `ATHENA_AI_MODEL_GEMINI`, `ATHENA_AI_MODEL_GROQ`, `ATHENA_AI_MODEL_OPENROUTER` or `ATHENA_AI_MODEL_DEEPSEEK`. Failover is automatic across every configured key (Gemini → Groq → OpenRouter → DeepSeek). When no key is configured every AI method returns `[]` gracefully.
 
 ### 3b. Coverage: authenticated scanning & headless crawl
 
@@ -511,11 +512,12 @@ Set any API key as an environment variable; the first configured provider wins:
 # Primary provider (Gemini)
 [System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "your-api-key", "User")
 
-# Optional failover providers (tried in order: Gemini → Groq → DeepSeek)
+# Optional failover providers (tried in order: Gemini → Groq → OpenRouter → DeepSeek)
 $env:GROQ_API_KEY = "your-groq-key"
+$env:OPENROUTER_API_KEY = "sk-or-v1-your-key"
 $env:DEEPSEEK_API_KEY = "your-deepseek-key"
 
-# Force a specific provider (default: gemini | groq | deepseek)
+# Force a specific provider (default: gemini | groq | openrouter | deepseek)
 $env:ATHENA_AI_PROVIDER = "groq"
 
 # Optional: override the default model per provider

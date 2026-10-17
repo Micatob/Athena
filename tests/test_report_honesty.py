@@ -191,5 +191,7 @@ class TestAiNoteWording:
         html = athena._generate_html_report(report)
         assert 'no finding was reclassified or removed' not in html
         assert 'excluded from active' in html
-        # the flagged findings stay visible in the report
-        assert 'https://honesty.test/admin' in html
+        # operator rule: what the terminal hides, the HTML hides too -
+        # the flagged URL never renders; only the count line does
+        assert 'https://honesty.test/admin' not in html
+        assert 'flagged as likely false positives' in html

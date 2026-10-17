@@ -1441,6 +1441,12 @@ class ReportGenerator:
             vtype = vuln.get('type', 'General Finding')
             confirmed_url = vuln.get('url', '')
             payload = vuln.get('payload', '')
+            # Every row carries a repro command even when the scanner saw
+            # no detection payload: `payload` stays the true detection
+            # payload (techniques branch on it), `repro` is what the row
+            # and disclosure branches display.
+            repro = payload or (f'curl -sk "{confirmed_url}"'
+                                if confirmed_url else '')
             sev = str(vuln.get('severity', 'UNKNOWN'))
 
             if vtype not in details:
@@ -1492,7 +1498,7 @@ class ReportGenerator:
                 ev_str = ''
             details[vtype]['confirmed_findings'].append({
                 'url': confirmed_url,
-                'payload': payload,
+                'payload': repro,
                 'description': vuln.get('description', ''),
                 'verified': verified,
                 'verification_status': vstat,
@@ -1619,7 +1625,25 @@ class ReportGenerator:
             if payload:
                 techniques.append(f"**Detected payload:** `{payload}`")
                 techniques.append(f"**Bypass auth:** Inject `*)(uid=*))(|(uid=*` to bypass login")
-        
+
+        elif 'phpinfo' in vtype.lower():
+            techniques.append(f"**Target URL:** `{url}`")
+            techniques.append(f"**Reproduce:** `{payload or f'curl -sk \"{url}\" | grep -i -m3 \"php version\"'}`")
+            techniques.append(f"**Harvest:** scopes, env vars, paths and loaded extensions feed version-specific CVE targeting (`Server`, `phpinfo()` -> public CVE match)")
+            techniques.append(f"**Fix:** remove the phpinfo script from production; block `info.php/phpinfo.php` at the web server")
+
+        elif 'sensitive' in vtype.lower() or 'exposed' in vtype.lower():
+            techniques.append(f"**Target URL:** `{url}`")
+            techniques.append(f"**Reproduce:** `{payload or f'curl -sk \"{url}\" -o proof.dat && file proof.dat'}`")
+            techniques.append(f"**Harvest:** download and grep for credentials, keys and internal paths; pair versions with public CVEs")
+            techniques.append(f"**Fix:** remove the exposed file from web root; deny dotfiles/backups at the web server")
+
+        elif 'directory listing' in vtype.lower():
+            techniques.append(f"**Target URL:** `{url}`")
+            techniques.append(f"**Reproduce:** `{payload or f'curl -sk \"{url}\" | grep -i -m5 \"index of\\|href\"'}`")
+            techniques.append(f"**Harvest:** enumerate listed files; direct-fetch sensitive extensions and backup variants (`.bak/.old/~/.swp`)")
+            techniques.append(f"**Fix:** disable autoindex / directory browsing on the web server")
+
         else:
             # Use base techniques with URL context
             techniques = [f"**Target URL:** `{url}`"] + base_techniques
