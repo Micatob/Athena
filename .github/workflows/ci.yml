@@ -15,7 +15,9 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-      - run: pip install flake8
+      # Pinned to the version the baseline was generated with - a flake8 /
+      # pycodestyle upgrade can add checks and would look like new debt.
+      - run: pip install flake8==7.3.0
       # The repo carries ~1000 pre-existing warnings (baseline snapshot in
       # .github/flake8-baseline.txt). Capture everything, then fail ONLY on
       # warnings the baseline does not cover - i.e. no NEW lint debt.

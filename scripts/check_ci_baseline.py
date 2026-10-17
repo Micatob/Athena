@@ -34,6 +34,22 @@ import sys
 _DIGITS = re.compile(r"\d+")
 
 
+def _read_text(path: str) -> str:
+    """Read a text file regardless of who wrote it.
+
+    PowerShell 5.1's ``>`` redirect emits UTF-16LE with a BOM; CI's bash
+    redirect emits UTF-8.  Reading UTF-16 as UTF-8 silently garbles every
+    key (NUL bytes) and the gate then flags its own baseline as all-new.
+    """
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig")
+    return raw.decode("utf-8", errors="replace")
+
+
 def _norm(text: str) -> str:
     """Mask digits so message length changes never count as new."""
     return _DIGITS.sub("#", str(text).strip())
@@ -48,22 +64,19 @@ def _norm_path(path: str) -> str:
 
 def parse_flake8(path: str):
     entries = []
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            if not line.strip():
-                continue
-            parts = line.split("|", 2)
-            if len(parts) != 3:
-                continue
-            fpath, code, text = parts
-            entries.append((f"{_norm_path(fpath)}|{code}|{_norm(text)}", None))
+    for line in _read_text(path).splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|", 2)
+        if len(parts) != 3:
+            continue
+        fpath, code, text = parts
+        entries.append((f"{_norm_path(fpath)}|{code}|{_norm(text)}", None))
     return entries
 
 
 def parse_bandit(path: str):
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        data = json.load(fh)
+    data = json.loads(_read_text(path))
     entries = []
     for res in data.get("results") or []:
         sev = str(res.get("issue_severity") or "UNDEFINED").upper()
@@ -92,8 +105,9 @@ def main(argv):
         return 2
     baseline = []
     try:
-        with open(baseline_path, encoding="utf-8") as fh:
-            baseline = [(line.rstrip("\n"), None) for line in fh if line.strip()]
+        baseline = [(line, None)
+                    for line in _read_text(baseline_path).splitlines()
+                    if line.strip()]
     except FileNotFoundError:
         if mode == "write":
             pass
